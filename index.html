@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Keep your projects organized in TeamConnect servers and channels."
+    />
+    <title>TeamConnect</title>
+    <link rel="stylesheet" href="css/app.css" />
+  </head>
+  <body>
+    <div class="workspace">
+      <nav class="server-bar" aria-label="Project servers">
+        <div class="app-brand">
+          <span class="brand-icon" aria-hidden="true">TC</span
+          ><strong>TeamConnect</strong>
+        </div>
+        <div id="server-list" class="server-list"></div>
+        <button
+          id="add-server"
+          class="server-icon add-server"
+          type="button"
+          aria-label="Create a server"
+          title="Create a server"
+        >
+          +
+        </button>
+      </nav>
+      <aside class="sidebar" id="sidebar" aria-label="Server channels">
+        <header class="workspace-brand">
+          <h2 id="server-name"></h2>
+          <p id="server-description"></p>
+        </header>
+        <nav class="channel-navigation" aria-label="Channels" style="visibility: hidden" aria-hidden="true" inert>
+          <div class="section-heading">
+            <h2>TEXT CHANNELS</h2>
+            <button
+              id="add-channel"
+              class="icon-button"
+              type="button"
+              aria-label="Create a channel"
+              title="Create a channel"
+            >
+              +
+            </button>
+          </div>
+          <div id="channel-list"></div>
+        </nav>
+
+        <div class="profile-area">
+          <div class="profile-popups">
+            <section id="profile-menu" class="profile-menu" aria-labelledby="profile-menu-title" hidden>
+              <h2 id="profile-menu-title">Profile &amp; Settings</h2>
+              <button id="profile-status-trigger" class="profile-details" type="button" aria-controls="profile-status-picker" aria-expanded="false">
+                <span class="profile-details-content">
+                  <span id="profile-menu-avatar" class="avatar" aria-hidden="true"></span>
+                  <span class="profile-identity">
+                    <strong id="profile-menu-name"></strong>
+                    <span id="profile-menu-email" hidden></span>
+                  </span>
+                  <span id="profile-status-icon" class="presence-icon" aria-hidden="true"></span>
+                  <span id="profile-current-status" class="visually-hidden"></span>
+                </span>
+              </button>
+              <fieldset id="profile-status-picker" class="profile-status-picker" hidden>
+                <legend>Set status</legend>
+                <label><input id="presence-active" type="radio" name="presence" value="active" checked /><span class="presence-icon" data-presence="active" aria-hidden="true">●</span> Active</label>
+                <label><input id="presence-away" type="radio" name="presence" value="away" /><span class="presence-icon" data-presence="away" aria-hidden="true">◷</span> Away</label>
+                <label><input id="presence-busy" type="radio" name="presence" value="busy" /><span class="presence-icon" data-presence="busy" aria-hidden="true">⊖</span> Busy</label>
+                <label><input id="presence-stealth" type="radio" name="presence" value="stealth" /><span class="presence-icon" data-presence="stealth" aria-hidden="true">○</span> Stealth</label>
+                <p id="presence-error" class="message-error" role="alert"></p>
+              </fieldset>
+              <div class="profile-logout"><button type="button" class="button secondary" disabled title="Sign-in is not connected yet">Log out</button></div>
+              <button id="open-profile-settings" class="profile-settings-button" type="button" aria-expanded="false" aria-controls="settings-popup"><span aria-hidden="true">⚙</span> Settings</button>
+            </section>
+            <section id="settings-popup" class="settings-popup" aria-labelledby="settings-popup-title" hidden>
+              <div class="settings-popup-heading">
+                <h2 id="settings-popup-title">Settings</h2>
+                <button id="close-settings-popup" class="icon-button" type="button" aria-label="Close Settings">×</button>
+              </div>
+              <ul class="settings-options">
+                <li>
+                  <button id="open-account-settings" type="button" aria-controls="account-page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/></svg>
+                    Account
+                  </button>
+                </li>
+                <li>
+                  <button id="open-appearance-settings" type="button" aria-controls="appearance-page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M7 12l5 5 8-8a3.5 3.5 0 0 0-5-5l-8 8Zm0 0c-2 1-1 4-4 6 4 2 8 0 9-1"/></svg>
+                    Appearance
+                  </button>
+                </li>
+                <li>
+                  <button type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/></svg>
+                    Data &amp; Privacy
+                  </button>
+                </li>
+                <li>
+                  <button type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20a2 2 0 0 0 4 0M4 17c3-3 2-5 2-8a6 6 0 0 1 12 0c0 3-1 5 2 8Z"/></svg>
+                    Notifications
+                  </button>
+                </li>
+                <li>
+                  <button type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v6m0 4v8m6-18v12m0 4v2m6-18v2m0 4v12M3 9h6m0 10h6m0-14h6"/></svg>
+                    Quick Reference &amp; Diagnostics
+                  </button>
+                </li>
+              </ul>
+            </section>
+          </div>
+          <button id="profile-trigger" class="user-profile" type="button" aria-expanded="false" aria-controls="profile-menu">
+            <span id="profile-avatar" class="avatar" aria-hidden="true"></span>
+            <strong id="profile-name">Arnav</strong>
+          </button>
+        </div>
+      </aside>
+      <div
+        id="sidebar-resizer"
+        class="sidebar-resizer"
+        role="separator"
+        tabindex="0"
+        aria-label="Resize channel sidebar"
+        aria-orientation="vertical"
+        aria-controls="sidebar"
+        aria-valuemin="200"
+        aria-valuemax="480"
+        aria-valuenow="250"
+        aria-valuetext="250 pixels"
+        title="Drag to resize · Arrow keys to adjust · Double-click to reset"
+      ></div>
+      <main class="chat" aria-label="Chat">
+        <header class="chat-header">
+          <button
+            type="button"
+            id="menu-button"
+            class="button secondary mobile-menu"
+            aria-controls="sidebar"
+            aria-expanded="false">
+            Channels
+          </button>
+        </header>
+        <div
+          id="workspace-error"
+          class="workspace-error"
+          role="alert"
+          hidden
+        ></div>
+        <ol
+          id="message-list"
+          class="message-list"
+          aria-label="Channel messages"
+        ></ol>
+        <form id="message-form" class="message-composer" style="visibility: hidden" aria-hidden="true" inert>
+          <label for="message-input" id="composer-label"
+            ></label
+          >
+          <div class="composer-controls">
+            <textarea
+              id="message-input"
+              rows="1"
+              maxlength="2000"
+              placeholder=""
+              aria-describedby="message-error"
+              required
+            ></textarea>
+            <button
+              type="submit"
+              class="button primary send-button"
+              aria-label="Send message"
+              title="Send message"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 19V5M5 12l7-7 7 7" />
+              </svg>
+            </button>
+          </div>
+          <p id="message-error" class="message-error" role="alert"></p>
+          <p id="message-status" class="visually-hidden" role="status"></p>
+        </form>
+      </main>
+      <main id="account-page" class="settings-page" aria-labelledby="profile-settings-title" hidden>
+        <div class="settings-panel">
+          <header class="settings-heading">
+            <h1 id="profile-settings-title" tabindex="-1">Profile</h1>
+            <button id="close-profile-settings" class="icon-button" type="button" aria-label="Close account settings">×</button>
+          </header>
+          <form id="profile-settings-form">
+            <div class="account-fields">
+              <div class="account-row">
+                <span>Profile Photo</span>
+                <span id="account-avatar" class="avatar" aria-hidden="true"></span>
+              </div>
+              <div class="account-row">
+                <label for="profile-display-name">Name</label>
+                <input id="profile-display-name" name="name" maxlength="60" autocomplete="name" required />
+              </div>
+              <div class="account-row">
+                <label for="profile-email">Email ID</label>
+                <input id="profile-email" name="email" type="email" maxlength="254" autocomplete="email" />
+              </div>
+              <div class="account-row">
+                <label for="profile-designation">Work Designation</label>
+                <input id="profile-designation" name="designation" maxlength="80" autocomplete="organization-title" />
+              </div>
+            </div>
+            <p id="profile-settings-error" class="message-error" role="alert"></p>
+            <div class="account-actions">
+              <p id="profile-settings-status" role="status"></p>
+              <button class="button primary" type="submit">Save changes</button>
+            </div>
+          </form>
+          <section class="account-devices" aria-labelledby="device-information-title">
+            <h2 id="device-information-title">Device Information</h2>
+            <div class="account-device-list">
+              <table aria-labelledby="device-information-title">
+                <thead>
+                  <tr><th scope="col">Device Name</th><th scope="col">Status</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>This browser</td><td><span class="online-dot" aria-hidden="true"></span>Active</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </main>
+      <main id="appearance-page" class="settings-page" aria-labelledby="appearance-title" hidden>
+        <div class="settings-panel">
+          <header class="settings-heading">
+            <h1 id="appearance-title" tabindex="-1">Appearance</h1>
+            <button id="close-appearance-settings" class="icon-button" type="button" aria-label="Close appearance settings">×</button>
+          </header>
+          <form id="appearance-form">
+            <div class="appearance-fields">
+              <div class="account-row">
+                <label for="appearance-theme">Theme</label>
+                <select id="appearance-theme" name="theme">
+                  <option value="browser" selected>Browser default</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+              <div class="account-row">
+                <label for="appearance-text-size">Text size</label>
+                <select id="appearance-text-size" name="textSize">
+                  <option value="small">Small</option>
+                  <option value="default" selected>Default</option>
+                  <option value="large">Large</option>
+                  <option value="extra-large">Extra large</option>
+                </select>
+              </div>
+              <div class="account-row">
+                <label for="appearance-font">Font</label>
+                <select id="appearance-font" name="font">
+                  <option value="system">System sans-serif</option>
+                  <option value="serif">Georgia</option>
+                  <option value="mono">System monospace</option>
+                </select>
+              </div>
+              <div class="account-row">
+                <label for="appearance-density">Icon density</label>
+                <select id="appearance-density" name="density">
+                  <option value="compact">Compact</option>
+                  <option value="default" selected>Default</option>
+                  <option value="spacious">Spacious</option>
+                </select>
+              </div>
+            </div>
+            <p id="appearance-error" class="message-error" role="alert"></p>
+          </form>
+        </div>
+      </main>
+    </div>
+    <dialog id="create-dialog" aria-labelledby="dialog-title">
+      <form id="create-form">
+        <div class="dialog-heading">
+          <span class="eyebrow"></span
+          ><button
+            id="close-dialog"
+            type="button"
+            class="icon-button"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+        <h2 id="dialog-title">Create a server</h2>
+        <p id="dialog-description">
+        </p>
+        <label for="entity-name" id="entity-label">Server name</label>
+        <input
+          id="entity-name"
+          required
+          autocomplete="off"
+          placeholder=""
+        />
+        <p id="dialog-error" class="message-error" role="alert"></p>
+        <p id="dialog-hint">
+        </p>
+        <div class="dialog-actions">
+          <button id="cancel-dialog" type="button" class="button secondary">
+            Cancel</button
+          ><button id="create-submit" type="submit" class="button primary">
+            Create server
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="server-info-dialog" aria-labelledby="server-info-title">
+      <div class="dialog-heading">
+        <h2 id="server-info-title">Server Information</h2>
+        <button id="close-server-info" class="icon-button" type="button" aria-label="Close server information" autofocus>×</button>
+      </div>
+      <p id="server-info-name" class="server-info-name"></p>
+      <dl class="server-info-details">
+        <div><dt>Members</dt><dd>1 local member (you)</dd></div>
+        <div><dt>Created by</dt><dd id="server-info-creator"></dd></div>
+        <div><dt>Created on</dt><dd id="server-info-created"></dd></div>
+        <div><dt>Channels</dt><dd id="server-info-channels"></dd></div>
+        <div><dt>Messages</dt><dd id="server-info-messages"></dd></div>
+      </dl>
+    </dialog>
+    <dialog id="edit-message-dialog" aria-labelledby="edit-message-title">
+      <form id="edit-message-form">
+        <div class="dialog-heading">
+          <h2 id="edit-message-title">Edit message</h2>
+        </div>
+        <label for="edit-message-input" class="visually-hidden">Message</label>
+        <textarea id="edit-message-input" rows="5" maxlength="2000" required autofocus></textarea>
+        <p id="edit-message-error" class="message-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="cancel-message-edit" type="button" class="button secondary">Cancel</button>
+          <button type="submit" class="button primary">Save changes</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="context-menu" class="context-menu" role="menu" aria-label="Options" hidden>
+      <button id="open-server-info" type="button" role="menuitem" aria-haspopup="dialog" tabindex="-1" hidden>Server Information</button>
+      <button id="edit-message-option" type="button" role="menuitem" aria-haspopup="dialog" tabindex="-1" hidden>Edit message</button>
+      <button id="delete-entity" type="button" role="menuitem" tabindex="-1">Delete server</button>
+    </div>
+    <script src="js/app.js" defer></script>
+    <script src="js/sidebarResize.js" defer></script>
+  </body>
+</html>
