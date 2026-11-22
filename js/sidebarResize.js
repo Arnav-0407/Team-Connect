@@ -15,7 +15,8 @@
 
   function maximum() {
     // Reserve enough space for the chat composer at the desktop breakpoint.
-    return Math.max(minimum, Math.min(480, workspace.getBoundingClientRect().width - 366));
+    const width = workspace.getBoundingClientRect().width || window.innerWidth;
+    return Math.max(minimum, Math.min(480, width - 366));
   }
   function applyWidth(width) {
     const bounded = Math.round(Math.max(minimum, Math.min(maximum(), width)));

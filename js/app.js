@@ -3,6 +3,19 @@ const MAX_MESSAGE_LENGTH = 2000;
 const PROFILE_KEY = "teamconnect.profile.v1";
 const PRESENCE_KEY = "teamconnect.presence";
 const APPEARANCE_KEY = "teamconnect.appearance.v1";
+const DEMO_SESSION_KEY = "teamconnect.demo-session.v2";
+const ADMIN_ID = "user-arnav";
+const demoUsers = {
+  "user-arnav": { name: "Admin", email: "Admin@gmail.com", role: "Workspace Admin",
+    salt: "271ee78fb99a5f6e7d4289e943726432", digest: "b56b6ac80ea30c16d9112af12def68cd07ecfa46f902a355c5a7caf1d446b1ee" },
+  "employee-arnav": { name: "Arnav Shaw", email: "arnavshaw@gmail.com", role: "Employee",
+    salt: "931068b51fdad6436b1a1c92e319b3f1", digest: "060b5afc60df6c7faa7f76cf0d03fc131fa6fed6923228f8749cb7022796685f" },
+  "employee-parth": { name: "Parth Singhal", email: "parthsinghal@gmail.com", role: "Employee",
+    salt: "e240bd8fbe4716a7f690bb6a297549c2", digest: "04b35b6533a38717f8fd96c1cbef23d725bc088e249910a5bb1ed44495f2cab3" }
+};
+const MAX_PHOTO_SIZE = 256 * 1024;
+const photoTypes = ["image/png", "image/jpeg", "image/webp"];
+const photoData = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 const appearanceOptions = {
   theme: ["browser", "light", "dark"],
   textSize: ["default", "small", "large", "extra-large"],
@@ -15,21 +28,40 @@ const presenceOptions = {
   busy: { label: "Busy", icon: "⊖" },
   stealth: { label: "Stealth", icon: "○" }
 };
-let presence = "active";
 const MAX_DESIGNATION_LENGTH = 80;
-const currentUser = { id: "user-arnav", name: "Arnav", email: "", designation: "" };
+function scopedKey(key, userId) {
+  return userId === ADMIN_ID ? key : `${key}.${userId}`;
+}
+function loadUser(userId) {
+  if (!Object.hasOwn(demoUsers, userId)) return null;
+  const user = { id: userId, name: demoUsers[userId].name, role: demoUsers[userId].role, email: demoUsers[userId].email, designation: "", photo: "" };
+  try {
+    const profile = JSON.parse(localStorage.getItem(scopedKey(PROFILE_KEY, userId)));
+    if (typeof profile?.name === "string" && profile.name.trim() && profile.name.length <= 60) user.name = profile.name.trim();
+    if (typeof profile?.email === "string" && profile.email.length <= 254) user.email = profile.email;
+    if (typeof profile?.designation === "string" && profile.designation.length <= MAX_DESIGNATION_LENGTH) {
+      user.designation = profile.designation;
+    }
+    if (typeof profile?.photo === "string" && profile.photo.length <= 4 * Math.ceil(MAX_PHOTO_SIZE / 3) + 24 && photoData.test(profile.photo)) {
+      user.photo = profile.photo;
+    }
+  } catch { /* Keep the demo profile if browser storage is unavailable. */ }
+  return user;
+}
+let userId = null;
 try {
-  const profile = JSON.parse(localStorage.getItem(PROFILE_KEY));
-  if (typeof profile?.name === "string" && profile.name.trim() && profile.name.length <= 60) currentUser.name = profile.name.trim();
-  if (typeof profile?.email === "string" && profile.email.length <= 254) currentUser.email = profile.email;
-  if (typeof profile?.designation === "string" && profile.designation.length <= MAX_DESIGNATION_LENGTH) {
-    currentUser.designation = profile.designation;
-  }
-} catch { /* Keep the existing profile if browser storage is unavailable. */ }
-try {
-  const savedPresence = localStorage.getItem(PRESENCE_KEY);
-  if (Object.hasOwn(presenceOptions, savedPresence)) presence = savedPresence;
-} catch { /* Keep the default status if browser storage is unavailable. */ }
+  userId = sessionStorage.getItem(DEMO_SESSION_KEY);
+} catch { /* Sign in again when session storage is unavailable. */ }
+let currentUser = loadUser(userId);
+function isAdmin() { return currentUser?.id === ADMIN_ID; }
+function loadPresence() {
+  try {
+    const saved = currentUser && localStorage.getItem(scopedKey(PRESENCE_KEY, currentUser.id));
+    if (Object.hasOwn(presenceOptions, saved)) return saved;
+  } catch { /* Use the default status if browser storage is unavailable. */ }
+  return "active";
+}
+let presence = loadPresence();
 const $ = (selector) => document.querySelector(selector);
 const messageInput = $("#message-input");
 const messageList = $("#message-list");
@@ -39,6 +71,7 @@ const sidebar = $("#sidebar");
 const menuButton = $("#menu-button");
 const dialog = $("#create-dialog");
 let dialogMode = "server";
+let createServerId = null;
 let storageBlocked = false;
 
 function id() {
@@ -51,6 +84,7 @@ function makeServer(name) {
   return {
     id: id(),
     name,
+    memberIds: [ADMIN_ID],
     createdBy: currentUser.name,
     createdAt: new Date().toISOString(),
     channels: [],
@@ -90,7 +124,7 @@ function validMessages(messages) {
     Number.isFinite(Date.parse(m.createdAt)));
 }
 function validateState(value) {
-  if (!value || value.version !== 1 || !Array.isArray(value.servers)) return false;
+  if (!value || !validAdminData(value) || value.version !== 1 || !Array.isArray(value.servers)) return false;
   const ids = new Set();
   const unique = (value) => {
     if (typeof value !== "string" || !value || ids.has(value)) return false;
@@ -99,7 +133,12 @@ function validateState(value) {
   };
   return value.servers.every((server) => server && unique(server.id) &&
     typeof server.name === "string" && server.name.trim() && Array.isArray(server.channels) &&
+    (server.memberIds === undefined || (Array.isArray(server.memberIds) && server.memberIds.includes(ADMIN_ID) &&
+      server.memberIds.every(id => Object.hasOwn(demoUsers, id)) && new Set(server.memberIds).size === server.memberIds.length)) &&
     server.channels.every((channel) => channel && unique(channel.id) && typeof channel.name === "string" && channel.name.trim() &&
+      (channel.archived === undefined || typeof channel.archived === "boolean") &&
+      (channel.drafts === undefined || (channel.drafts && typeof channel.drafts === "object" &&
+        !Array.isArray(channel.drafts) && Object.values(channel.drafts).every(text => typeof text === "string"))) &&
       typeof channel.draft === "string" && validMessages(channel.messages)) &&
     (server.channels.length ? server.channels.some((channel) => channel.id === server.activeChannelId) : server.activeChannelId === null)) &&
     (value.servers.length ? value.servers.some((server) => server.id === value.activeServerId) : value.activeServerId === null);
@@ -130,7 +169,16 @@ function loadState() {
   }
 }
 let state = loadState();
-function activeServer() { return state.servers.find((server) => server.id === state.activeServerId); }
+function memberIds(server) {
+  // Before membership was stored, every account could access every server.
+  return server.memberIds ?? Object.keys(demoUsers);
+}
+function canAccess(server) {
+  return Boolean(server && currentUser && memberIds(server).includes(currentUser.id));
+}
+function activeServer() {
+  return state.servers.find(server => server.id === state.activeServerId && canAccess(server)) ?? state.servers.find(canAccess);
+}
 function activeChannel() { return activeServer()?.channels.find((channel) => channel.id === activeServer().activeChannelId); }
 function updateState(change) {
   if (storageBlocked) return false;
@@ -158,28 +206,42 @@ function node(tag, className, text) {
 function initials(name) {
   return name.trim().split(/\s+/).slice(0, 2).map((word) => Array.from(word)[0]).join("").toUpperCase();
 }
+function renderAvatar(avatar, name, photo) {
+  avatar.textContent = initials(name);
+  if (photo) {
+    const image = node("img");
+    image.alt = "";
+    image.addEventListener("error", () => { avatar.textContent = initials(name); });
+    image.src = photo;
+    avatar.replaceChildren(image);
+  }
+}
 function closeSidebar() {
   sidebar.classList.remove("open");
   menuButton.setAttribute("aria-expanded", "false");
 }
 function renderMessages() {
-  const serverId = state.activeServerId;
+  const serverId = activeServer()?.id;
   const channel = activeChannel();
   messageList.replaceChildren();
-  if (!channel) return;
+  if (!channel || !currentUser) return;
+  const profiles = new Map(Object.keys(demoUsers).map((id) => [id, id === currentUser.id ? currentUser : loadUser(id)]));
   const messages = [...channel.messages].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const message of messages) {
     const own = message.authorId === currentUser.id;
     const item = node("li", `message${own ? " message-own" : ""}`);
-    const avatar = node("span", "avatar", initials(message.authorName));
+    const avatar = node("span", "avatar");
+    const author = profiles.get(message.authorId);
+    const authorName = author?.name ?? message.authorName;
+    renderAvatar(avatar, authorName, author?.photo);
     avatar.setAttribute("aria-hidden", "true");
     const content = node("div", "message-content");
     const metadata = node("div", "message-meta");
     const time = node("time", "", new Date(message.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
     time.dateTime = message.createdAt;
-    metadata.append(node("strong", "", `${message.authorName}${own ? " (You)" : ""}`), time);
-    if (message.editedAt) metadata.append(node("span", "message-edited", "Edited"));
-    if (own && !storageBlocked) {
+    metadata.append(node("strong", "", `${authorName}${own ? " (You)" : ""}`), time);
+    if (message.editedAt && !message.removedBy) metadata.append(node("span", "message-edited", "Edited"));
+    if ((own || isAdmin()) && !storageBlocked && !channel.archived && !message.removedBy) {
       const options = node("button", "icon-button message-options", "⋯");
       options.type = "button";
       options.setAttribute("aria-label", "Message options");
@@ -193,7 +255,8 @@ function renderMessages() {
       item.addEventListener("contextmenu", openOptions);
       metadata.append(options);
     }
-    content.append(metadata, node("p", "message-text", message.text));
+    content.append(metadata, node("p", message.removedBy ? "message-text message-removed" : "message-text",
+      message.removedBy ? "Removed by an admin." : message.text));
     item.append(avatar, content);
     messageList.append(item);
   }
@@ -211,17 +274,23 @@ const accountPage = $("#account-page");
 const appearancePage = $("#appearance-page");
 const appearanceForm = $("#appearance-form");
 const appearanceError = $("#appearance-error");
+const appearanceStatus = $("#appearance-status");
 const profileForm = $("#profile-settings-form");
 const profileError = $("#profile-settings-error");
 const profileStatus = $("#profile-settings-status");
+const photoInput = $("#profile-photo");
+const removePhotoButton = $("#remove-profile-photo");
+const saveProfileButton = $("#save-profile");
+let removePhoto = false;
 function renderProfile() {
   $("#profile-name").textContent = currentUser.name;
   $("#profile-menu-name").textContent = currentUser.name;
-  $("#profile-avatar").textContent = initials(currentUser.name);
-  $("#profile-menu-avatar").textContent = initials(currentUser.name);
-  $("#account-avatar").textContent = initials(currentUser.name);
+  for (const selector of ["#profile-avatar", "#profile-menu-avatar", "#account-avatar"]) {
+    renderAvatar($(selector), currentUser.name, currentUser.photo);
+  }
   $("#profile-menu-email").textContent = currentUser.email;
   $("#profile-menu-email").hidden = !currentUser.email;
+  $("#account-role").textContent = currentUser.role;
 }
 function closeSettingsPopup(restoreFocus = false) {
   settingsPopup.hidden = true;
@@ -287,9 +356,9 @@ presenceTrigger.addEventListener("click", () => {
 });
 presencePicker.addEventListener("change", (event) => {
   const selected = event.target.value;
-  if (!Object.hasOwn(presenceOptions, selected)) return;
+  if (!currentUser || !Object.hasOwn(presenceOptions, selected)) return;
   try {
-    localStorage.setItem(PRESENCE_KEY, selected);
+    localStorage.setItem(scopedKey(PRESENCE_KEY, currentUser.id), selected);
     presence = selected;
     presenceError.textContent = "";
   } catch {
@@ -312,6 +381,9 @@ accountSettings.addEventListener("click", () => {
   $("#profile-display-name").value = currentUser.name;
   $("#profile-email").value = currentUser.email;
   $("#profile-designation").value = currentUser.designation;
+  photoInput.value = "";
+  removePhoto = false;
+  renderPhotoControls();
   profileError.textContent = "";
   profileStatus.textContent = "";
   showSettingsPage(accountPage, $("#profile-settings-title"));
@@ -319,6 +391,7 @@ accountSettings.addEventListener("click", () => {
 function showSettingsPage(page, heading) {
   closeProfileMenu();
   closeSidebar();
+  $("#admin-page").hidden = page !== $("#admin-page");
   accountPage.hidden = page !== accountPage;
   appearancePage.hidden = page !== appearancePage;
   chat.hidden = true;
@@ -326,6 +399,7 @@ function showSettingsPage(page, heading) {
   heading.focus();
 }
 function closeSettingsPages() {
+  $("#admin-page").hidden = true;
   accountPage.hidden = true;
   appearancePage.hidden = true;
   chat.hidden = false;
@@ -337,7 +411,7 @@ function exitSettingsPage() {
 }
 $("#close-profile-settings").addEventListener("click", exitSettingsPage);
 $("#close-appearance-settings").addEventListener("click", exitSettingsPage);
-for (const page of [accountPage, appearancePage]) {
+for (const page of [accountPage, appearancePage, $("#admin-page")]) {
   page.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !event.defaultPrevented) exitSettingsPage();
   });
@@ -345,7 +419,7 @@ for (const page of [accountPage, appearancePage]) {
 function loadAppearance() {
   let saved;
   try {
-    saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY));
+    if (currentUser) saved = JSON.parse(localStorage.getItem(scopedKey(APPEARANCE_KEY, currentUser.id)));
   } catch { /* Use defaults if browser storage is unavailable or invalid. */ }
   return Object.fromEntries(Object.entries(appearanceOptions).map(([name, choices]) => [
     name, choices.includes(saved?.[name]) ? saved[name] : choices[0]
@@ -361,28 +435,71 @@ function renderAppearance() {
 renderAppearance();
 $("#open-appearance-settings").addEventListener("click", () => {
   appearanceError.textContent = "";
+  appearanceStatus.textContent = "Changes save automatically.";
   showSettingsPage(appearancePage, $("#appearance-title"));
 });
 appearanceForm.addEventListener("submit", (event) => event.preventDefault());
-appearanceForm.addEventListener("change", (event) => {
-  const { name, value } = event.target;
-  if (!Object.hasOwn(appearanceOptions, name) || !appearanceOptions[name].includes(value)) return;
-  const next = { ...appearance, [name]: value };
+function saveAppearance(next, status) {
   try {
-    localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next));
+    localStorage.setItem(scopedKey(APPEARANCE_KEY, currentUser.id), JSON.stringify(next));
     appearance = next;
     appearanceError.textContent = "";
+    appearanceStatus.textContent = status;
   } catch {
+    appearanceStatus.textContent = "";
     appearanceError.textContent = "Could not save your appearance settings. Check browser storage and try again.";
   }
   renderAppearance();
+}
+appearanceForm.addEventListener("change", (event) => {
+  const { name, value } = event.target;
+  if (!currentUser || !Object.hasOwn(appearanceOptions, name) || !appearanceOptions[name].includes(value)) return;
+  saveAppearance({ ...appearance, [name]: value }, "Appearance saved.");
+});
+$("#reset-appearance").addEventListener("click", () => {
+  if (!currentUser) return;
+  const defaults = Object.fromEntries(Object.entries(appearanceOptions).map(([name, choices]) => [name, choices[0]]));
+  saveAppearance(defaults, "Appearance reset to defaults.");
 });
 profileForm.addEventListener("input", () => {
   profileError.textContent = "";
   profileStatus.textContent = "";
 });
-profileForm.addEventListener("submit", (event) => {
+function renderPhotoControls() {
+  removePhotoButton.hidden = removePhoto || (!currentUser.photo && !photoInput.files.length);
+  renderAvatar($("#account-avatar"), currentUser.name, removePhoto ? "" : currentUser.photo);
+}
+photoInput.addEventListener("change", () => {
+  if (photoInput.files.length) {
+    removePhoto = false;
+    profileStatus.textContent = "Save changes to apply your photo.";
+  }
+  renderPhotoControls();
+});
+removePhotoButton.addEventListener("click", () => {
+  photoInput.value = "";
+  removePhoto = Boolean(currentUser.photo);
+  renderPhotoControls();
+  profileError.textContent = "";
+  profileStatus.textContent = removePhoto ? "Save changes to remove your photo." : "";
+  photoInput.focus();
+});
+async function readProfilePhoto(file) {
+  const image = await createImageBitmap(file);
+  image.close();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (photoData.test(reader.result)) resolve(reader.result);
+      else reject(new Error("Unsupported photo data"));
+    });
+    reader.addEventListener("error", reject);
+    reader.readAsDataURL(file);
+  });
+}
+profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!currentUser || saveProfileButton.disabled) return;
   profileStatus.textContent = "";
   const name = $("#profile-display-name").value.trim();
   const email = $("#profile-email").value.trim();
@@ -395,25 +512,111 @@ profileForm.addEventListener("submit", (event) => {
     profileError.textContent = `Keep your work designation to ${MAX_DESIGNATION_LENGTH} characters or fewer.`;
     return;
   }
+  const user = currentUser;
+  const file = photoInput.files[0];
+  let photo = removePhoto ? "" : user.photo;
+  if (file) {
+    if (!photoTypes.includes(file.type) || file.size > MAX_PHOTO_SIZE) {
+      profileError.textContent = "Choose a PNG, JPEG or WebP photo of 256 KB or less.";
+      return;
+    }
+    const fields = profileForm.querySelector(".account-fields");
+    fields.inert = true;
+    saveProfileButton.disabled = true;
+    try {
+      photo = await readProfilePhoto(file);
+    } catch {
+      if (user === currentUser) profileError.textContent = "This photo could not be opened. Choose a different image.";
+      return;
+    } finally {
+      fields.inert = false;
+      saveProfileButton.disabled = false;
+    }
+  }
+  if (user !== currentUser) return;
   try {
-    const profile = { name, email, designation };
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    const profile = { name, email, designation, photo };
+    localStorage.setItem(scopedKey(PROFILE_KEY, user.id), JSON.stringify(profile));
     Object.assign(currentUser, profile);
+    photoInput.value = "";
+    removePhoto = false;
     renderProfile();
+    renderPhotoControls();
+    renderMessages();
     profileError.textContent = "";
     profileStatus.textContent = "Profile updated.";
   } catch {
     profileError.textContent = "Could not save your profile. Check browser storage and try again.";
   }
 });
-renderProfile();
-renderPresence();
+function renderSession() {
+  $(".workspace").hidden = !currentUser;
+  $("#demo-sign-in").hidden = Boolean(currentUser);
+  appearance = loadAppearance();
+  renderAppearance();
+  if (currentUser) {
+    presence = loadPresence();
+    renderProfile();
+    renderPresence();
+  }
+  render();
+}
+function changeSession(user) {
+  currentUser = user;
+  try {
+    sessionStorage.setItem(DEMO_SESSION_KEY, user?.id ?? "signed-out");
+  } catch { /* The demo still works until the page reloads. */ }
+  closeProfileMenu();
+  closeSettingsPages();
+  closeSidebar();
+  for (const modal of [dialog, serverInfoDialog, editMessageDialog, addMemberDialog]) {
+    if (modal.open) modal.close();
+  }
+  renderSession();
+  if (user) (menuButton.getClientRects().length ? menuButton : profileTrigger).focus();
+  else $("#demo-sign-in-title").focus();
+}
+$("#log-out").addEventListener("click", () => changeSession(null));
+$("#demo-sign-in-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submit = $("#sign-in-submit");
+  if (currentUser || submit.disabled) return;
+  const email = $("#demo-account").value.trim().toLowerCase();
+  const password = $("#sign-in-password");
+  const error = $("#sign-in-error");
+  submit.disabled = true;
+  error.textContent = "";
+  try {
+    const match = Object.entries(demoUsers).find(([, account]) => account.email.toLowerCase() === email);
+    if (match) {
+      const [id, account] = match;
+      const encoder = new TextEncoder();
+      const key = await crypto.subtle.importKey("raw", encoder.encode(password.value), "PBKDF2", false, ["deriveBits"]);
+      const bits = await crypto.subtle.deriveBits({
+        name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(account.salt), iterations: 600000
+      }, key, 256);
+      const digest = Array.from(new Uint8Array(bits), byte => byte.toString(16).padStart(2, "0")).join("");
+      if (digest === account.digest) {
+        password.value = "";
+        changeSession(loadUser(id));
+        return;
+      }
+    }
+    error.textContent = "The email or password is incorrect.";
+    password.focus();
+  } catch {
+    error.textContent = "Password verification is unavailable. Open TeamConnect using HTTPS or localhost.";
+  } finally {
+    submit.disabled = false;
+  }
+});
 let menuServerId = null;
 let menuChannelId = null;
 let menuMessageId = null;
 let menuTrigger = null;
 const serverInfoOption = $("#open-server-info");
 const editMessageOption = $("#edit-message-option");
+const archiveChannelOption = $("#archive-channel-option");
 const deleteOption = $("#delete-entity");
 const serverInfoDialog = $("#server-info-dialog");
 const editMessageDialog = $("#edit-message-dialog");
@@ -431,6 +634,12 @@ function closeContextMenu(restoreFocus = false) {
 }
 function openContextMenu(event, serverId, trigger, channelId = null, messageId = null) {
   event.preventDefault();
+  if (!currentUser) return;
+  const channel = messageChannel(state, { serverId, channelId });
+  const message = channel?.messages.find((entry) => entry.id === messageId);
+  if (messageId !== null && (!message || channel.archived || message.removedBy ||
+    (!isAdmin() && message.authorId !== currentUser.id))) return;
+  if (messageId === null && channelId !== null && (!channel || !isAdmin())) return;
   closeProfileMenu();
   closeContextMenu();
   menuServerId = serverId;
@@ -438,8 +647,12 @@ function openContextMenu(event, serverId, trigger, channelId = null, messageId =
   menuMessageId = messageId;
   const entity = messageId !== null ? "message" : channelId !== null ? "channel" : "server";
   serverInfoOption.hidden = channelId !== null;
-  editMessageOption.hidden = messageId === null;
-  deleteOption.textContent = `Delete ${entity}`;
+  editMessageOption.hidden = !message || message.authorId !== currentUser.id;
+  archiveChannelOption.hidden = !isAdmin() || !channel || Boolean(message);
+  archiveChannelOption.disabled = storageBlocked;
+  archiveChannelOption.textContent = channel?.archived ? "Restore channel" : "Archive channel";
+  deleteOption.hidden = !message && !isAdmin();
+  deleteOption.textContent = message && message.authorId !== currentUser.id ? "Remove message as admin" : `Delete ${entity}`;
   deleteOption.disabled = storageBlocked;
   $("#context-menu").setAttribute("aria-label", `${entity[0].toUpperCase()}${entity.slice(1)} options`);
   menuTrigger = trigger;
@@ -455,19 +668,25 @@ function openContextMenu(event, serverId, trigger, channelId = null, messageId =
   contextMenuItems()[0]?.focus();
 }
 function contextMenuItems() {
-  return [serverInfoOption, editMessageOption, deleteOption].filter((item) => !item.hidden && !item.disabled);
+  return [serverInfoOption, editMessageOption, archiveChannelOption, deleteOption].filter((item) => !item.hidden && !item.disabled);
 }
 function messageChannel(workspace, { serverId, channelId }) {
-  return workspace.servers.find((server) => server.id === serverId)
+  return workspace.servers.find((server) => server.id === serverId && canAccess(server))
     ?.channels.find((channel) => channel.id === channelId);
 }
-function updateOwnMessage(target, change) {
+function changeMessage(target, change, allowModeration = false) {
+  if (!currentUser) return "Sign in to change messages.";
   let changed = false;
   const saved = updateState((latest) => {
     const channel = messageChannel(latest, target);
-    const index = channel?.messages.findIndex((message) =>
-      message.id === target.messageId && message.authorId === currentUser.id) ?? -1;
-    if (index >= 0) changed = change(channel.messages, index);
+    if (!channel || channel.archived) return;
+    const index = channel.messages.findIndex((message) =>
+      message.id === target.messageId && !message.removedBy &&
+      (message.authorId === currentUser.id || (allowModeration && isAdmin())));
+    if (index >= 0) {
+      changed = change(channel.messages, index);
+      if (changed && allowModeration) recordEvent(latest, serverFor(latest, target.serverId), "Moderation", "Removed a message in #" + channel.name);
+    }
   });
   if (!saved) return "Could not save your changes. Check browser storage and try again.";
   if (!changed) return "This message was changed or removed. Reopen its options to try again.";
@@ -475,8 +694,9 @@ function updateOwnMessage(target, change) {
 }
 function deleteServer(serverId) {
   const server = state.servers.find((entry) => entry.id === serverId);
-  if (storageBlocked || !server || !window.confirm(`Delete server “${server.name}” and all its channels and messages? This cannot be undone.`)) return;
+  if (!isAdmin() || storageBlocked || !server || !window.confirm(`Delete server “${server.name}” and all its channels and messages? This cannot be undone.`)) return;
   if (updateState((next) => {
+    recordEvent(next, server, "Servers", "Deleted server");
     next.servers = next.servers.filter((entry) => entry.id !== serverId);
     if (next.activeServerId === serverId) next.activeServerId = next.servers[0]?.id ?? null;
   })) {
@@ -488,10 +708,11 @@ function deleteServer(serverId) {
 function deleteChannel(serverId, channelId) {
   const server = state.servers.find((entry) => entry.id === serverId);
   const channel = server?.channels.find((entry) => entry.id === channelId);
-  if (storageBlocked || !channel || !window.confirm(`Delete channel #${channel.name} and all its messages? This cannot be undone.`)) return;
+  if (!isAdmin() || storageBlocked || !channel || !window.confirm(`Delete channel #${channel.name} and all its messages? This cannot be undone.`)) return;
   if (updateState((next) => {
     const target = next.servers.find((entry) => entry.id === serverId);
     if (!target) return;
+    recordEvent(next, target, "Channels", "Deleted #" + channel.name);
     target.channels = target.channels.filter((entry) => entry.id !== channelId);
     if (target.activeChannelId === channelId) target.activeChannelId = target.channels[0]?.id ?? null;
   })) {
@@ -500,11 +721,38 @@ function deleteChannel(serverId, channelId) {
     $("#message-status").textContent = `Channel ${channel.name} deleted.`;
   }
 }
+archiveChannelOption.addEventListener("click", () => {
+  if (!isAdmin() || storageBlocked) return;
+  const target = { serverId: menuServerId, channelId: menuChannelId };
+  const channel = messageChannel(state, target);
+  closeContextMenu(true);
+  if (channel) setChannelArchived(target.serverId, target.channelId, !channel.archived);
+});
+function setChannelArchived(serverId, channelId, archive) {
+  const target = { serverId, channelId };
+  const channel = messageChannel(state, target);
+  if (!isAdmin() || !channel) return;
+  if (archive && !window.confirm(`Archive #${channel.name} and make it read-only?`)) return;
+  if (updateState((latest) => {
+    const savedChannel = messageChannel(latest, target);
+    if (savedChannel && Boolean(savedChannel.archived) !== archive) {
+      savedChannel.archived = archive;
+      recordEvent(latest, serverFor(latest, target.serverId), "Channels", (archive ? "Archived #" : "Restored #") + savedChannel.name);
+    }
+  })) {
+    render();
+    $("#message-status").textContent = archive ? "Channel archived." : "Channel restored.";
+    $("#channel-list").children[activeServer()?.channels.findIndex((entry) => entry.id === channel.id)]?.focus();
+  }
+}
 function render() {
+  refreshAdminSettings();
   closeContextMenu();
+  if (serverInfoDialog.open) renderServerInfo();
+  if (editMessageDialog.open && editingMessage && !messageChannel(state, editingMessage)) editMessageDialog.close();
   const server = activeServer();
   const channel = activeChannel();
-  $("#server-list").replaceChildren(...state.servers.map((entry) => {
+  $("#server-list").replaceChildren(...state.servers.filter(canAccess).map((entry) => {
     const button = node("button", `server-icon${entry.id === server?.id ? " active" : ""}`, entry.name);
     button.type = "button";
     button.title = entry.name;
@@ -526,13 +774,15 @@ function render() {
     return button;
   }));
   $("#server-name").textContent = server?.name ?? "";
-  $("#server-description").textContent = "";
+  $("#add-member").hidden = !isAdmin() || !server;
+  $("#add-member").disabled = storageBlocked;
   $("#channel-list").replaceChildren(...(server?.channels ?? []).map((entry) => {
     const button = node("button", `channel-button${entry.id === channel?.id ? " active" : ""}`);
     button.type = "button";
     const hash = node("span", "hash", "#");
     hash.setAttribute("aria-hidden", "true");
     button.append(hash, node("span", "", entry.name));
+    if (entry.archived) button.append(node("small", "channel-archived", "Archived"));
     if (entry.id === channel?.id) button.setAttribute("aria-current", "page");
     button.addEventListener("click", () => {
       if (updateState((next) => { next.servers.find((s) => s.id === server.id).activeChannelId = entry.id; })) {
@@ -540,36 +790,42 @@ function render() {
         render(); closeSidebar(); messageInput.focus();
       }
     });
-    button.setAttribute("aria-haspopup", "menu");
-    button.setAttribute("aria-expanded", "false");
-    button.addEventListener("contextmenu", (event) => openContextMenu(event, server.id, button, entry.id));
-    button.addEventListener("keydown", (event) => {
-      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openContextMenu(event, server.id, button, entry.id);
-    });
+    if (isAdmin()) {
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", "false");
+      button.addEventListener("contextmenu", (event) => openContextMenu(event, server.id, button, entry.id));
+      button.addEventListener("keydown", (event) => {
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openContextMenu(event, server.id, button, entry.id);
+      });
+    }
     return button;
   }));
   chat.setAttribute("aria-label", channel ? `Chat: ${channel.name}` : "Chat");
   $("#composer-label").textContent = channel ? `#${channel.name}` : "";
   messageInput.placeholder = channel ? `Message #${channel.name}…` : "";
-  messageInput.value = channel?.draft ?? "";
+  messageInput.value = (isAdmin() ? channel?.draft : channel?.drafts?.[currentUser?.id]) ?? "";
   messageForm.style.visibility = channel ? "visible" : "hidden";
   messageForm.setAttribute("aria-hidden", String(!channel));
   messageForm.inert = !channel;
-  messageInput.disabled = storageBlocked || !channel;
+  messageInput.disabled = storageBlocked || !currentUser || !channel || Boolean(channel.archived);
+  $("#archived-channel-note").hidden = !channel?.archived;
+  $("#add-server").hidden = !isAdmin();
   $("#add-server").disabled = storageBlocked;
   const channelNavigation = $(".channel-navigation");
   channelNavigation.style.visibility = server ? "visible" : "hidden";
   channelNavigation.setAttribute("aria-hidden", String(!server));
   channelNavigation.inert = !server;
+  $("#add-channel").hidden = !isAdmin();
   $("#add-channel").disabled = storageBlocked || !server;
-  messageForm.querySelector("button").disabled = storageBlocked || !channel;
+  messageForm.querySelector("button").disabled = messageInput.disabled;
   $("#message-error").textContent = "";
   renderMessages();
   document.title = channel ? `${server.name} · #${channel.name} | TeamConnect` : server ? `${server.name} | TeamConnect` : "TeamConnect";
 }
 function openCreate(mode) {
-  if (mode === "channel" && !activeServer()) return;
+  if (!isAdmin() || storageBlocked || (mode === "channel" && !activeServer())) return;
   dialogMode = mode;
+  createServerId = activeServer()?.id;
   const isServer = mode === "server";
   $("#create-form").reset();
   $("#dialog-title").textContent = isServer ? "Create a server" : "Create a channel";
@@ -585,10 +841,69 @@ function openCreate(mode) {
   dialog.showModal();
   $("#entity-name").focus();
 }
+let infoServerId = null;
+function openServerInfo(serverId) {
+  infoServerId = serverId;
+  if (!renderServerInfo()) return;
+  $("#server-members").open = false;
+  serverInfoDialog.showModal();
+}
 serverInfoOption.addEventListener("click", () => {
-  const server = state.servers.find((entry) => entry.id === menuServerId);
-  if (!server || menuChannelId !== null) return;
+  const id = menuServerId;
   closeContextMenu(true);
+  openServerInfo(id);
+});
+const addMemberDialog = $("#add-member-dialog");
+let memberTargetId = null;
+$("#add-member").addEventListener("click", () => {
+  const server = activeServer();
+  if (!isAdmin() || !server || storageBlocked) return;
+  memberTargetId = server.id;
+  $("#add-member-title").textContent = "Add member to " + server.name;
+  $("#member-email").value = "";
+  $("#add-member-error").textContent = "";
+  addMemberDialog.showModal();
+});
+$("#cancel-add-member").addEventListener("click", () => addMemberDialog.close());
+$("#add-member-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (!isAdmin() || !addMemberDialog.open) return;
+  const email = $("#member-email").value.trim().toLowerCase();
+  const id = Object.keys(demoUsers).find(id => demoUsers[id].email.toLowerCase() === email);
+  const error = $("#add-member-error");
+  if (!id) {
+    error.textContent = "No account has that sign-in email.";
+    return;
+  }
+  let issue = "";
+  const saved = updateState(latest => {
+    const server = latest.servers.find(entry => entry.id === memberTargetId);
+    if (!server) issue = "This server no longer exists.";
+    else if (memberIds(server).includes(id)) issue = "This person already has access.";
+    else {
+      server.memberIds = [...memberIds(server), id];
+      recordEvent(latest, server, "Membership", "Added " + demoUsers[id].email);
+    }
+  });
+  if (!saved || issue) {
+    error.textContent = issue || "Could not save the membership change. Try again.";
+    return;
+  }
+  addMemberDialog.close();
+  render();
+  $("#message-status").textContent = demoUsers[id].name + " added to the server.";
+});
+
+function renderServerInfo() {
+  const server = state.servers.find(entry => entry.id === infoServerId);
+  if (!canAccess(server)) {
+    if (serverInfoDialog.open) serverInfoDialog.close();
+    return false;
+  }
+  const ids = memberIds(server);
+  $("#server-member-count").textContent = ids.length + (ids.length === 1 ? " member" : " members");
+  $("#server-member-error").textContent = "";
+  $("#server-member-list").replaceChildren(...ids.map(id => memberRow(server, id)));
   const createdAt = typeof server.createdAt === "string" ? Date.parse(server.createdAt) : NaN;
   $("#server-info-name").textContent = server.name;
   $("#server-info-creator").textContent = typeof server.createdBy === "string" && server.createdBy.trim()
@@ -600,14 +915,15 @@ serverInfoOption.addEventListener("click", () => {
   $("#server-info-channels").textContent = server.channels.length.toLocaleString();
   $("#server-info-messages").textContent = server.channels
     .reduce((total, channel) => total + channel.messages.length, 0).toLocaleString();
-  serverInfoDialog.showModal();
-});
+  return true;
+}
 $("#close-server-info").addEventListener("click", () => serverInfoDialog.close());
 editMessageOption.addEventListener("click", () => {
   const target = { serverId: menuServerId, channelId: menuChannelId, messageId: menuMessageId };
-  const message = messageChannel(state, target)?.messages.find((entry) =>
-    entry.id === target.messageId && entry.authorId === currentUser.id);
-  if (!message) return;
+  const channel = messageChannel(state, target);
+  const message = channel?.messages.find((entry) =>
+    entry.id === target.messageId && entry.authorId === currentUser?.id && !entry.removedBy);
+  if (!message || channel.archived) return;
   closeContextMenu(true);
   editingMessage = { ...target, text: message.text, editedAt: message.editedAt };
   editMessageInput.value = message.text;
@@ -628,7 +944,7 @@ $("#edit-message-form").addEventListener("submit", (event) => {
     editMessageInput.focus();
     return;
   }
-  const error = updateOwnMessage(editingMessage, (messages, index) => {
+  const error = changeMessage(editingMessage, (messages, index) => {
     const message = messages[index];
     if (message.text !== editingMessage.text || message.editedAt !== editingMessage.editedAt) return false;
     if (message.text !== text) {
@@ -657,13 +973,22 @@ deleteOption.addEventListener("click", () => {
   const messageId = menuMessageId;
   closeContextMenu(true);
   if (messageId !== null) {
-    if (!window.confirm("Delete this message? This cannot be undone.")) return;
-    const error = updateOwnMessage({ serverId, channelId, messageId }, (messages, index) => {
-      messages.splice(index, 1);
+    const target = { serverId, channelId, messageId };
+    const message = messageChannel(state, target)?.messages.find((entry) => entry.id === messageId);
+    if (!currentUser || !message || (message.authorId !== currentUser.id && !isAdmin())) return;
+    const moderation = message.authorId !== currentUser.id;
+    if (!window.confirm(moderation
+      ? "Remove this message as an admin? The channel will show a removal marker."
+      : "Delete this message? This cannot be undone.")) return;
+    const error = changeMessage(target, (messages, index) => {
+      if (moderation) {
+        messages[index].text = "";
+        messages[index].removedBy = currentUser.id;
+      } else messages.splice(index, 1);
       return true;
-    });
+    }, moderation);
     if (error) $("#message-error").textContent = error;
-    else refreshAfterMessageChange("Message deleted.");
+    else refreshAfterMessageChange(moderation ? "Message removed by admin." : "Message deleted.");
   } else if (channelId) {
     deleteChannel(serverId, channelId);
   } else {
@@ -697,6 +1022,7 @@ $("#cancel-dialog").addEventListener("click", () => dialog.close());
 $("#close-dialog").addEventListener("click", () => dialog.close());
 $("#create-form").addEventListener("submit", (event) => {
   event.preventDefault();
+  if (!isAdmin()) return;
   const isChannel = dialogMode === "channel";
   let name = $("#entity-name").value.trim();
   if (isChannel) name = name.toLowerCase().replace(/\s+/g, "-");
@@ -704,30 +1030,33 @@ $("#create-form").addEventListener("submit", (event) => {
     $("#dialog-error").textContent = isChannel ? "Enter a channel name using letters, numbers, and single hyphens." : "Enter a server name.";
     return;
   }
-  const serverId = activeServer()?.id;
-  let duplicate = false;
+  const serverId = createServerId;
+  let creationError = "";
   const saved = updateState((next) => {
     if (!isChannel) {
       const created = makeServer(name);
+      recordEvent(next, created, "Servers", "Created server");
       next.servers.push(created); next.activeServerId = created.id;
     } else {
       const server = next.servers.find((s) => s.id === serverId);
+      if (!server) { creationError = "This server no longer exists."; return; }
       if (server.channels.some((entry) => entry.name.toLowerCase() === name)) {
-        duplicate = true;
+        creationError = "A channel with this name already exists.";
         return;
       }
       const channel = makeChannel(name);
+      recordEvent(next, server, "Channels", "Created #" + name);
       server.channels.push(channel); server.activeChannelId = channel.id;
     }
   });
-  if (duplicate) { $("#dialog-error").textContent = "A channel with this name already exists."; return; }
+  if (creationError) { $("#dialog-error").textContent = creationError; return; }
   if (!saved) { $("#dialog-error").textContent = "Could not save. Check your browser storage and try again."; return; }
   dialog.close(); closeSettingsPages(); render(); closeSidebar(); messageInput.focus();
   $("#message-status").textContent = `${dialogMode === "server" ? "Server" : "Channel"} ${name} created.`;
 });
 messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (!activeChannel()) return;
+  if (!currentUser || !activeChannel() || activeChannel().archived) return;
   const text = messageInput.value.trim();
   if (!text || text.length > MAX_MESSAGE_LENGTH) {
     $("#message-error").textContent = "Enter a message of 1–2,000 characters.";
@@ -735,21 +1064,36 @@ messageForm.addEventListener("submit", (event) => {
   }
   const channelId = activeChannel().id;
   const serverId = activeServer()?.id;
-  if (updateState((next) => {
-    const channel = next.servers.find((s) => s.id === serverId).channels.find((c) => c.id === channelId);
+  let sent = false;
+  const saved = updateState((next) => {
+    const channel = messageChannel(next, { serverId, channelId });
+    if (!channel || channel.archived) return;
     channel.messages.push({ id: id(), authorId: currentUser.id, authorName: currentUser.name, text, createdAt: new Date().toISOString() });
-    channel.draft = "";
-  })) {
+    if (!isAdmin() && /(?:^|\s)@admin\b/i.test(text)) recordEvent(next, serverFor(next, serverId), "Mentions", "Mentioned @Admin in #" + channel.name);
+    if (isAdmin()) channel.draft = "";
+    else if (channel.drafts) delete channel.drafts[currentUser.id];
+    sent = true;
+  });
+  if (saved && sent) {
     render(); $("#message-status").textContent = "Message sent."; messageInput.focus();
+  } else if (saved) {
+    render();
+    $("#message-error").textContent = "This channel has been archived or removed.";
   }
 });
 messageInput.addEventListener("input", () => {
-  if (!activeChannel()) return;
+  if (!currentUser || !activeChannel() || activeChannel().archived) return;
   $("#message-error").textContent = ""; $("#message-status").textContent = "";
   const channelId = activeChannel().id;
   const serverId = activeServer()?.id;
   updateState((next) => {
-    next.servers.find((s) => s.id === serverId).channels.find((c) => c.id === channelId).draft = messageInput.value;
+    const channel = messageChannel(next, { serverId, channelId });
+    if (!channel || channel.archived) return;
+    if (isAdmin()) channel.draft = messageInput.value;
+    else {
+      channel.drafts ??= {};
+      channel.drafts[currentUser.id] = messageInput.value;
+    }
   });
 });
 messageInput.addEventListener("keydown", (event) => {
@@ -762,7 +1106,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && sidebar.classList.contains("open") && !dialog.open) { closeSidebar(); menuButton.focus(); }
 });
 window.addEventListener("storage", (event) => {
-  if (event.key === APPEARANCE_KEY || event.key === null) {
+  if (event.key === null || (currentUser && event.key === scopedKey(APPEARANCE_KEY, currentUser.id))) {
     appearance = loadAppearance();
     renderAppearance();
   }
@@ -772,4 +1116,34 @@ window.addEventListener("storage", (event) => {
     render();
   }
 });
-render();
+initAdminSettings();
+renderSession();
+
+function memberRow(server, id) {
+  const member = loadUser(id);
+  const row = node("li", "member-row");
+  const identity = node("div");
+  identity.append(node("strong", "", member.name), node("small", "", demoUsers[id].email + " · " + member.role));
+  row.append(identity);
+  if (isAdmin() && id !== ADMIN_ID) {
+    const remove = node("button", "button secondary", "Remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "Remove " + member.name + " from " + server.name);
+    remove.addEventListener("click", () => {
+      if (!isAdmin() || !window.confirm("Remove " + member.name + " from " + server.name + "? They will lose access to its channels.")) return;
+      const saved = updateState(latest => {
+        const target = latest.servers.find(entry => entry.id === server.id);
+        if (target && memberIds(target).includes(id)) {
+          target.memberIds = memberIds(target).filter(memberId => memberId !== id);
+          recordEvent(latest, target, "Membership", "Removed " + demoUsers[id].email);
+        }
+      });
+      if (saved) {
+        render();
+        if (serverInfoDialog.open) $("#server-member-count").focus();
+      } else $("#server-member-error").textContent = "Could not save the membership change. Try again.";
+    });
+    row.append(remove);
+  }
+  return row;
+}
