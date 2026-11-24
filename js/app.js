@@ -1,5 +1,6 @@
 const STORAGE_KEY = "teamconnect.workspace.v1";
 const MAX_MESSAGE_LENGTH = 2000;
+const PASSWORD_KEY = "teamconnect.password.v1";
 const PROFILE_KEY = "teamconnect.profile.v1";
 const PRESENCE_KEY = "teamconnect.presence";
 const APPEARANCE_KEY = "teamconnect.appearance.v1";
@@ -54,9 +55,9 @@ try {
 } catch { /* Sign in again when session storage is unavailable. */ }
 let currentUser = loadUser(userId);
 function isAdmin() { return currentUser?.id === ADMIN_ID; }
-function loadPresence() {
+function loadPresence(userId = currentUser?.id) {
   try {
-    const saved = currentUser && localStorage.getItem(scopedKey(PRESENCE_KEY, currentUser.id));
+    const saved = userId && localStorage.getItem(scopedKey(PRESENCE_KEY, userId));
     if (Object.hasOwn(presenceOptions, saved)) return saved;
   } catch { /* Use the default status if browser storage is unavailable. */ }
   return "active";
@@ -271,10 +272,9 @@ const settingsTrigger = $("#open-profile-settings");
 const settingsPopup = $("#settings-popup");
 const accountSettings = $("#open-account-settings");
 const accountPage = $("#account-page");
-const appearancePage = $("#appearance-page");
-const appearanceForm = $("#appearance-form");
-const appearanceError = $("#appearance-error");
-const appearanceStatus = $("#appearance-status");
+const themeTrigger = $("#open-theme-settings");
+const themePanel = $("#theme-panel");
+const themeError = $("#theme-error");
 const profileForm = $("#profile-settings-form");
 const profileError = $("#profile-settings-error");
 const profileStatus = $("#profile-settings-status");
@@ -293,6 +293,7 @@ function renderProfile() {
   $("#account-role").textContent = currentUser.role;
 }
 function closeSettingsPopup(restoreFocus = false) {
+  closeThemePanel();
   settingsPopup.hidden = true;
   settingsTrigger.setAttribute("aria-expanded", "false");
   if (restoreFocus) settingsTrigger.focus();
@@ -339,6 +340,7 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     event.stopImmediatePropagation();
     if (!presencePicker.hidden) closePresencePicker(true);
+    else if (!themePanel.hidden) closeThemePanel(true);
     else if (!settingsPopup.hidden) closeSettingsPopup(true);
     else closeProfileMenu(true);
   }
@@ -365,6 +367,7 @@ presencePicker.addEventListener("change", (event) => {
     presenceError.textContent = "Could not save your status. Check browser storage and try again.";
   }
   renderPresence();
+  refreshMemberStatuses(scopedKey(PRESENCE_KEY, currentUser.id));
 });
 settingsTrigger.addEventListener("click", () => {
   if (!settingsPopup.hidden) {
@@ -393,15 +396,15 @@ function showSettingsPage(page, heading) {
   closeSidebar();
   $("#admin-page").hidden = page !== $("#admin-page");
   accountPage.hidden = page !== accountPage;
-  appearancePage.hidden = page !== appearancePage;
   chat.hidden = true;
   page.scrollTop = 0;
   heading.focus();
 }
 function closeSettingsPages() {
   $("#admin-page").hidden = true;
+  $("#change-password-form")?.remove();
+  $("#help-request-form")?.remove();
   accountPage.hidden = true;
-  appearancePage.hidden = true;
   chat.hidden = false;
 }
 function exitSettingsPage() {
@@ -410,8 +413,7 @@ function exitSettingsPage() {
   else profileTrigger.focus();
 }
 $("#close-profile-settings").addEventListener("click", exitSettingsPage);
-$("#close-appearance-settings").addEventListener("click", exitSettingsPage);
-for (const page of [accountPage, appearancePage, $("#admin-page")]) {
+for (const page of [accountPage, $("#admin-page")]) {
   page.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !event.defaultPrevented) exitSettingsPage();
   });
@@ -429,37 +431,37 @@ let appearance = loadAppearance();
 function renderAppearance() {
   for (const [name, value] of Object.entries(appearance)) {
     document.documentElement.dataset[name] = value;
-    appearanceForm.elements[name].value = value;
   }
+  for (const option of themePanel.querySelectorAll("input")) option.checked = option.value === appearance.theme;
 }
 renderAppearance();
-$("#open-appearance-settings").addEventListener("click", () => {
-  appearanceError.textContent = "";
-  appearanceStatus.textContent = "Changes save automatically.";
-  showSettingsPage(appearancePage, $("#appearance-title"));
+function closeThemePanel(restoreFocus = false) {
+  themePanel.hidden = true;
+  themeTrigger.setAttribute("aria-expanded", "false");
+  if (restoreFocus) themeTrigger.focus();
+}
+themeTrigger.addEventListener("click", () => {
+  if (!themePanel.hidden) {
+    closeThemePanel(true);
+    return;
+  }
+  themeError.textContent = "";
+  themePanel.hidden = false;
+  themeTrigger.setAttribute("aria-expanded", "true");
+  themePanel.querySelector(":checked")?.focus();
 });
-appearanceForm.addEventListener("submit", (event) => event.preventDefault());
-function saveAppearance(next, status) {
+themePanel.addEventListener("change", event => {
+  const { value } = event.target;
+  if (!currentUser || !appearanceOptions.theme.includes(value)) return;
+  const next = { ...loadAppearance(), theme: value };
   try {
     localStorage.setItem(scopedKey(APPEARANCE_KEY, currentUser.id), JSON.stringify(next));
     appearance = next;
-    appearanceError.textContent = "";
-    appearanceStatus.textContent = status;
+    themeError.textContent = "";
   } catch {
-    appearanceStatus.textContent = "";
-    appearanceError.textContent = "Could not save your appearance settings. Check browser storage and try again.";
+    themeError.textContent = "Could not save your theme. Check browser storage and try again.";
   }
   renderAppearance();
-}
-appearanceForm.addEventListener("change", (event) => {
-  const { name, value } = event.target;
-  if (!currentUser || !Object.hasOwn(appearanceOptions, name) || !appearanceOptions[name].includes(value)) return;
-  saveAppearance({ ...appearance, [name]: value }, "Appearance saved.");
-});
-$("#reset-appearance").addEventListener("click", () => {
-  if (!currentUser) return;
-  const defaults = Object.fromEntries(Object.entries(appearanceOptions).map(([name, choices]) => [name, choices[0]]));
-  saveAppearance(defaults, "Appearance reset to defaults.");
 });
 profileForm.addEventListener("input", () => {
   profileError.textContent = "";
@@ -576,6 +578,29 @@ function changeSession(user) {
   if (user) (menuButton.getClientRects().length ? menuButton : profileTrigger).focus();
   else $("#demo-sign-in-title").focus();
 }
+function passwordCredentials(userId) {
+  const saved = localStorage.getItem(scopedKey(PASSWORD_KEY, userId));
+  if (saved === null) return demoUsers[userId];
+  const credentials = JSON.parse(saved);
+  if (!/^[a-f0-9]{32}$/.test(credentials?.salt) || !/^[a-f0-9]{64}$/.test(credentials?.digest)) {
+    throw new Error("Invalid saved credential");
+  }
+  return credentials;
+}
+
+function hex(bytes) {
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function passwordDigest(password, salt) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({
+    name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(salt), iterations: 600000
+  }, key, 256);
+  return hex(new Uint8Array(bits));
+}
+
 $("#log-out").addEventListener("click", () => changeSession(null));
 $("#demo-sign-in-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -589,14 +614,10 @@ $("#demo-sign-in-form").addEventListener("submit", async (event) => {
   try {
     const match = Object.entries(demoUsers).find(([, account]) => account.email.toLowerCase() === email);
     if (match) {
-      const [id, account] = match;
-      const encoder = new TextEncoder();
-      const key = await crypto.subtle.importKey("raw", encoder.encode(password.value), "PBKDF2", false, ["deriveBits"]);
-      const bits = await crypto.subtle.deriveBits({
-        name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(account.salt), iterations: 600000
-      }, key, 256);
-      const digest = Array.from(new Uint8Array(bits), byte => byte.toString(16).padStart(2, "0")).join("");
-      if (digest === account.digest) {
+      const [id] = match;
+      const account = passwordCredentials(id);
+      if (await passwordDigest(password.value, account.salt) === account.digest &&
+          passwordCredentials(id).digest === account.digest) {
         password.value = "";
         changeSession(loadUser(id));
         return;
@@ -605,7 +626,7 @@ $("#demo-sign-in-form").addEventListener("submit", async (event) => {
     error.textContent = "The email or password is incorrect.";
     password.focus();
   } catch {
-    error.textContent = "Password verification is unavailable. Open TeamConnect using HTTPS or localhost.";
+    error.textContent = "Password verification is unavailable. Check browser storage and open TeamConnect using HTTPS or localhost.";
   } finally {
     submit.disabled = false;
   }
@@ -614,6 +635,7 @@ let menuServerId = null;
 let menuChannelId = null;
 let menuMessageId = null;
 let menuTrigger = null;
+const managementOption = $("#open-workspace-management");
 const serverInfoOption = $("#open-server-info");
 const editMessageOption = $("#edit-message-option");
 const archiveChannelOption = $("#archive-channel-option");
@@ -647,6 +669,7 @@ function openContextMenu(event, serverId, trigger, channelId = null, messageId =
   menuMessageId = messageId;
   const entity = messageId !== null ? "message" : channelId !== null ? "channel" : "server";
   serverInfoOption.hidden = channelId !== null;
+  managementOption.hidden = !isAdmin() || entity !== "server";
   editMessageOption.hidden = !message || message.authorId !== currentUser.id;
   archiveChannelOption.hidden = !isAdmin() || !channel || Boolean(message);
   archiveChannelOption.disabled = storageBlocked;
@@ -668,7 +691,7 @@ function openContextMenu(event, serverId, trigger, channelId = null, messageId =
   contextMenuItems()[0]?.focus();
 }
 function contextMenuItems() {
-  return [serverInfoOption, editMessageOption, archiveChannelOption, deleteOption].filter((item) => !item.hidden && !item.disabled);
+  return [serverInfoOption, managementOption, editMessageOption, archiveChannelOption, deleteOption].filter((item) => !item.hidden && !item.disabled);
 }
 function messageChannel(workspace, { serverId, channelId }) {
   return workspace.servers.find((server) => server.id === serverId && canAccess(server))
@@ -774,8 +797,6 @@ function render() {
     return button;
   }));
   $("#server-name").textContent = server?.name ?? "";
-  $("#add-member").hidden = !isAdmin() || !server;
-  $("#add-member").disabled = storageBlocked;
   $("#channel-list").replaceChildren(...(server?.channels ?? []).map((entry) => {
     const button = node("button", `channel-button${entry.id === channel?.id ? " active" : ""}`);
     button.type = "button";
@@ -822,10 +843,10 @@ function render() {
   renderMessages();
   document.title = channel ? `${server.name} · #${channel.name} | TeamConnect` : server ? `${server.name} | TeamConnect` : "TeamConnect";
 }
-function openCreate(mode) {
-  if (!isAdmin() || storageBlocked || (mode === "channel" && !activeServer())) return;
+function openCreate(mode, serverId = activeServer()?.id) {
+  if (!isAdmin() || storageBlocked || (mode === "channel" && !serverFor(state, serverId))) return;
   dialogMode = mode;
-  createServerId = activeServer()?.id;
+  createServerId = serverId;
   const isServer = mode === "server";
   $("#create-form").reset();
   $("#dialog-title").textContent = isServer ? "Create a server" : "Create a channel";
@@ -853,17 +874,23 @@ serverInfoOption.addEventListener("click", () => {
   closeContextMenu(true);
   openServerInfo(id);
 });
+managementOption.addEventListener("click", () => {
+  const serverId = menuServerId;
+  if (!isAdmin() || menuChannelId !== null || !serverFor(state, serverId)) return;
+  closeContextMenu(true);
+  openAdminSection(0, serverId);
+});
 const addMemberDialog = $("#add-member-dialog");
 let memberTargetId = null;
-$("#add-member").addEventListener("click", () => {
-  const server = activeServer();
+function openAddMember(serverId) {
+  const server = serverFor(state, serverId);
   if (!isAdmin() || !server || storageBlocked) return;
   memberTargetId = server.id;
   $("#add-member-title").textContent = "Add member to " + server.name;
   $("#member-email").value = "";
   $("#add-member-error").textContent = "";
   addMemberDialog.showModal();
-});
+}
 $("#cancel-add-member").addEventListener("click", () => addMemberDialog.close());
 $("#add-member-form").addEventListener("submit", event => {
   event.preventDefault();
@@ -891,7 +918,8 @@ $("#add-member-form").addEventListener("submit", event => {
   }
   addMemberDialog.close();
   render();
-  $("#message-status").textContent = demoUsers[id].name + " added to the server.";
+  $("#admin-status").textContent = demoUsers[id].name + " added to the server.";
+  $("#admin-title").focus();
 });
 
 function renderServerInfo() {
@@ -902,8 +930,7 @@ function renderServerInfo() {
   }
   const ids = memberIds(server);
   $("#server-member-count").textContent = ids.length + (ids.length === 1 ? " member" : " members");
-  $("#server-member-error").textContent = "";
-  $("#server-member-list").replaceChildren(...ids.map(id => memberRow(server, id)));
+  $("#server-member-list").replaceChildren(...ids.map(id => memberRow(id)));
   const createdAt = typeof server.createdAt === "string" ? Date.parse(server.createdAt) : NaN;
   $("#server-info-name").textContent = server.name;
   $("#server-info-creator").textContent = typeof server.createdBy === "string" && server.createdBy.trim()
@@ -1051,8 +1078,19 @@ $("#create-form").addEventListener("submit", (event) => {
   });
   if (creationError) { $("#dialog-error").textContent = creationError; return; }
   if (!saved) { $("#dialog-error").textContent = "Could not save. Check your browser storage and try again."; return; }
-  dialog.close(); closeSettingsPages(); render(); closeSidebar(); messageInput.focus();
-  $("#message-status").textContent = `${dialogMode === "server" ? "Server" : "Channel"} ${name} created.`;
+  const status = `${isChannel ? "Channel" : "Server"} ${name} created.`;
+  dialog.close();
+  if (isChannel && !$("#admin-page").hidden && adminSection === 0) {
+    render();
+    $("#admin-status").textContent = status;
+    $("#admin-title").focus();
+  } else {
+    closeSettingsPages();
+    render();
+    closeSidebar();
+    messageInput.focus();
+    $("#message-status").textContent = status;
+  }
 });
 messageForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1106,6 +1144,13 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && sidebar.classList.contains("open") && !dialog.open) { closeSidebar(); menuButton.focus(); }
 });
 window.addEventListener("storage", (event) => {
+  if (event.key === PRESENCE_KEY || event.key?.startsWith(PRESENCE_KEY + ".")) {
+    if (currentUser && event.key === scopedKey(PRESENCE_KEY, currentUser.id)) {
+      presence = loadPresence();
+      renderPresence();
+    }
+    refreshMemberStatuses(event.key);
+  }
   if (event.key === null || (currentUser && event.key === scopedKey(APPEARANCE_KEY, currentUser.id))) {
     appearance = loadAppearance();
     renderAppearance();
@@ -1119,14 +1164,38 @@ window.addEventListener("storage", (event) => {
 initAdminSettings();
 renderSession();
 
-function memberRow(server, id) {
+function updateMemberStatus(indicator, userId) {
+  const status = loadPresence(userId);
+  indicator.setAttribute("data-presence", status);
+  indicator.textContent = presenceOptions[status].label;
+}
+
+function refreshMemberStatuses(storageKey) {
+  for (const indicator of document.querySelectorAll("#admin-results [data-member-status]")) {
+    const userId = indicator.getAttribute("data-member-status");
+    if (storageKey === scopedKey(PRESENCE_KEY, userId)) updateMemberStatus(indicator, userId);
+  }
+}
+
+function memberRow(id, server = null) {
   const member = loadUser(id);
   const row = node("li", "member-row");
   const identity = node("div");
-  identity.append(node("strong", "", member.name), node("small", "", demoUsers[id].email + " · " + member.role));
+  const details = [demoUsers[id].email];
+  if (server && member.designation.trim()) details.push(member.designation.trim());
+  details.push(member.role);
+  const name = node("div", "member-name");
+  name.append(node("strong", "", member.name));
+  if (server) {
+    const status = node("span", "member-status");
+    status.setAttribute("data-member-status", id);
+    updateMemberStatus(status, id);
+    name.append(status);
+  }
+  identity.append(name, node("small", "", details.join(" · ")));
   row.append(identity);
-  if (isAdmin() && id !== ADMIN_ID) {
-    const remove = node("button", "button secondary", "Remove");
+  if (server && isAdmin() && id !== ADMIN_ID) {
+    const remove = node("button", "button secondary member-remove", "Remove");
     remove.type = "button";
     remove.setAttribute("aria-label", "Remove " + member.name + " from " + server.name);
     remove.addEventListener("click", () => {
@@ -1140,8 +1209,9 @@ function memberRow(server, id) {
       });
       if (saved) {
         render();
-        if (serverInfoDialog.open) $("#server-member-count").focus();
-      } else $("#server-member-error").textContent = "Could not save the membership change. Try again.";
+        $("#admin-status").textContent = member.name + " removed from the server.";
+        $("#admin-title").focus();
+      } else $("#admin-status").textContent = "Could not save the membership change. Try again.";
     });
     row.append(remove);
   }

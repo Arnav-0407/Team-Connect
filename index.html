@@ -43,7 +43,6 @@
       <aside class="sidebar" id="sidebar" aria-label="Server channels">
         <header class="workspace-brand">
           <h2 id="server-name"></h2>
-          <button id="add-member" class="button secondary" type="button" aria-haspopup="dialog" hidden>Add member</button>
         </header>
         <nav class="channel-navigation" aria-label="Channels" style="visibility: hidden" aria-hidden="true" inert>
           <div class="section-heading">
@@ -99,17 +98,23 @@
                     Account
                   </button>
                 </li>
-                <li>
-                  <button id="open-appearance-settings" type="button" aria-controls="appearance-page">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M7 12l5 5 8-8a3.5 3.5 0 0 0-5-5l-8 8Zm0 0c-2 1-1 4-4 6 4 2 8 0 9-1"/></svg>
-                    Appearance
+                <li class="theme-setting">
+                  <button id="open-theme-settings" type="button" aria-controls="theme-panel" aria-expanded="false">
+                    <span class="theme-symbol" aria-hidden="true">◐</span>
+                    Theme
+                    <span class="theme-chevron" aria-hidden="true"></span>
                   </button>
+                  <fieldset id="theme-panel" class="theme-panel" hidden>
+                    <legend class="visually-hidden">Theme</legend>
+                    <label><input name="workspace-theme" type="radio" value="browser" /><span>System</span></label>
+                    <label><input name="workspace-theme" type="radio" value="light" /><span>Light</span></label>
+                    <label><input name="workspace-theme" type="radio" value="dark" /><span>Dark</span></label>
+                    <p id="theme-error" class="message-error" role="alert"></p>
+                  </fieldset>
                 </li>
-                <li id="admin-menu-0" hidden><button id="admin-open-0" type="button">Workspace Management</button></li>
                 <li id="admin-menu-1" hidden><button id="admin-open-1" type="button">Activity Log</button></li>
                 <li id="admin-menu-2" hidden><button id="admin-open-2" type="button">Data &amp; Privacy</button></li>
-                <li id="admin-menu-3" hidden><button id="admin-open-3" type="button">Notifications</button></li>
-                <li id="admin-menu-4" hidden><button id="admin-open-4" type="button">Help &amp; Diagnostics</button></li>
+                <li id="admin-menu-3" hidden><button id="admin-open-3" type="button">Help Centre</button></li>
               </ul>
             </section>
           </div>
@@ -237,56 +242,6 @@
           <p class="settings-note">This demo stores your profile in this browser.</p>
         </div>
       </main>
-      <main id="appearance-page" class="settings-page" aria-labelledby="appearance-title" hidden>
-        <div class="settings-panel">
-          <header class="settings-heading">
-            <h1 id="appearance-title" tabindex="-1">Appearance</h1>
-            <button id="close-appearance-settings" class="icon-button" type="button" aria-label="Close appearance settings">×</button>
-          </header>
-          <form id="appearance-form">
-            <div class="appearance-fields">
-              <div class="account-row">
-                <label for="appearance-theme">Theme</label>
-                <select id="appearance-theme" name="theme">
-                  <option value="browser" selected>Browser default</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
-              </div>
-              <div class="account-row">
-                <label for="appearance-text-size">Text size</label>
-                <select id="appearance-text-size" name="textSize">
-                  <option value="small">Small</option>
-                  <option value="default" selected>Default</option>
-                  <option value="large">Large</option>
-                  <option value="extra-large">Extra large</option>
-                </select>
-              </div>
-              <div class="account-row">
-                <label for="appearance-font">Font</label>
-                <select id="appearance-font" name="font">
-                  <option value="system">System sans-serif</option>
-                  <option value="serif">Georgia</option>
-                  <option value="mono">System monospace</option>
-                </select>
-              </div>
-              <div class="account-row">
-                <label for="appearance-density">Icon size</label>
-                <select id="appearance-density" name="density">
-                  <option value="compact">Small</option>
-                  <option value="default" selected>Default</option>
-                  <option value="spacious">Large</option>
-                </select>
-              </div>
-            </div>
-            <p id="appearance-error" class="message-error" role="alert"></p>
-            <div class="account-actions">
-              <p class="settings-note" id="appearance-status" role="status">Changes save automatically.</p>
-              <button id="reset-appearance" class="button secondary" type="button">Reset to defaults</button>
-            </div>
-          </form>
-        </div>
-      </main>
       <main id="admin-page" class="settings-page" aria-labelledby="admin-title" hidden>
         <div class="settings-panel">
           <header class="settings-heading"><h1 id="admin-title" tabindex="-1"></h1><button id="admin-close" class="icon-button" aria-label="Close settings">×</button></header>
@@ -350,7 +305,6 @@
       <dl class="server-info-details">
         <div><dt>Members</dt><dd>
           <details id="server-members"><summary id="server-member-count"></summary><ul id="server-member-list"></ul></details>
-          <p id="server-member-error" class="message-error" role="alert"></p>
         </dd></div>
         <div><dt>Created by</dt><dd id="server-info-creator"></dd></div>
         <div><dt>Created on</dt><dd id="server-info-created"></dd></div>
@@ -374,6 +328,7 @@
     </dialog>
     <div id="context-menu" class="context-menu" role="menu" aria-label="Options" hidden>
       <button id="open-server-info" type="button" role="menuitem" aria-haspopup="dialog" tabindex="-1" hidden>Server Information</button>
+      <button id="open-workspace-management" type="button" role="menuitem" tabindex="-1" hidden>Workspace Management</button>
       <button id="edit-message-option" type="button" role="menuitem" aria-haspopup="dialog" tabindex="-1" hidden>Edit message</button>
       <button id="archive-channel-option" type="button" role="menuitem" tabindex="-1" hidden>Archive channel</button>
       <button id="delete-entity" type="button" role="menuitem" tabindex="-1">Delete server</button>

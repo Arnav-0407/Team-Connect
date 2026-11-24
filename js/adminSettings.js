@@ -1,5 +1,9 @@
-const adminSections = ["Workspace Management", "Activity Log", "Data & Privacy", "Notifications", "Help & Diagnostics"];
+const adminSections = ["Workspace Management", "Activity Log", "Data & Privacy", "Help Centre"];
+const HELP_SECTION = 3;
+const helpStatuses = ["Pending", "Resolved", "Rejected"];
+const MAX_HELP_LENGTH = 1000;
 let adminSection = 0;
+let managementServerId = null;
 let managementView = "Members";
 let memberQuery = "";
 let logServer = "";
@@ -16,36 +20,39 @@ function recordEvent(workspace, server, category, action) {
   workspace.events = workspace.events.slice(-500);
 }
 
-function inbox(workspace) {
-  const prefs = workspace.alerts ?? {};
-  return (workspace.events ?? []).filter(event =>
-    ["Membership", "Mentions"].includes(event.category) && prefs[event.category] !== false &&
-    !prefs.muted?.includes(event.serverId));
-}
-
 function initAdminSettings() {
-  adminSections.forEach((name, i) => {
-    $("#admin-open-" + i).addEventListener("click", () => {
-      if (!isAdmin()) return;
-      adminSection = i;
-      $("#admin-title").textContent = name;
-      $("#admin-status").textContent = "";
-      showSettingsPage($("#admin-page"), $("#admin-title"));
-      refreshAdminSettings();
-    });
+  adminSections.slice(1).forEach((_, index) => {
+    const section = index + 1;
+    $("#admin-open-" + section).addEventListener("click", () => openAdminSection(section));
   });
   $("#admin-close").addEventListener("click", exitSettingsPage);
 }
 
+function openAdminSection(section, serverId = null) {
+  if (!currentUser || (section !== HELP_SECTION && !isAdmin())) return;
+  adminSection = section;
+  managementServerId = serverId;
+  $("#admin-title").textContent = adminSections[section];
+  $("#admin-status").textContent = "";
+  $("#admin-results").replaceChildren();
+  showSettingsPage($("#admin-page"), $("#admin-title"));
+  refreshAdminSettings();
+}
+
 function refreshAdminSettings() {
-  adminSections.forEach((_, i) => { $("#admin-menu-" + i).hidden = !isAdmin(); });
+  $("#admin-menu-1").hidden = !isAdmin();
+  $("#admin-menu-2").hidden = !isAdmin();
+  $("#admin-menu-3").hidden = !currentUser;
+  if ($("#admin-page").hidden || !currentUser) return;
+  if (adminSection === HELP_SECTION) {
+    helpSettings();
+    return;
+  }
   if (!isAdmin()) return;
-  const unread = inbox(state).filter(event => !event.read).length;
-  $("#admin-open-3").textContent = unread ? "Notifications (" + unread + ")" : "Notifications";
-  if ($("#admin-page").hidden) return;
+  if ($("#admin-page").hidden || (adminSection === 2 && $("#change-password-form"))) return;
   $("#admin-controls").replaceChildren();
   $("#admin-results").replaceChildren();
-  [managementSettings, activitySettings, dataSettings, notificationSettings, diagnosticSettings][adminSection]();
+  [managementSettings, activitySettings, dataSettings][adminSection]();
 }
 
 function settingsButton(label, action) {
@@ -71,41 +78,42 @@ function settingsSelect(label, options, selected, change) {
 
 function managementSettings() {
   const controls = $("#admin-controls");
-  const server = activeServer();
-  controls.append(settingsButton("Create server", () => openCreate("server")));
-  if (!server) return;
-  controls.append(settingsSelect("Server", state.servers.map(s => [s.id, s.name]), server.id, value => {
-    if (updateState(next => { next.activeServerId = value; })) render();
-  }));
+  const server = serverFor(state, managementServerId);
+  const results = $("#admin-results");
+  $("#admin-title").textContent = server ? "Workspace Management · " + server.name : "Workspace Management";
+  if (!server) {
+    results.append(node("p", "", "This server is no longer available."));
+    return;
+  }
   for (const view of ["Members", "Channels"]) {
     const button = settingsButton(view, () => { managementView = view; refreshAdminSettings(); });
     button.setAttribute("aria-pressed", String(view === managementView));
     controls.append(button);
   }
-  const results = $("#admin-results");
   if (managementView === "Members") {
-    controls.append(settingsButton("Add member", () => $("#add-member").click()));
+    const toolbar = node("div", "member-toolbar");
+    const addMember = settingsButton("Add member", () => openAddMember(server.id));
+    addMember.classList.add("member-add");
     const search = node("input");
     search.type = "search";
     search.setAttribute("aria-label", "Search members by name or email");
     search.placeholder = "Search name or email";
     search.value = memberQuery;
-    controls.append(search);
+    toolbar.append(search, addMember);
+    const memberResults = node("div");
+    results.append(toolbar, memberResults);
     const listMembers = () => {
-      const list = node("ul", "admin-list");
+      const list = node("ul", "admin-list managed-members");
       for (const id of memberIds(server)) {
         const user = loadUser(id);
         if (!(user.name + " " + demoUsers[id].email).toLowerCase().includes(memberQuery.toLowerCase())) continue;
-        const row = memberRow(server, id);
-        row.append(node("small", "", "Servers: " + state.servers.filter(s => memberIds(s).includes(id)).map(s => s.name).join(", ")));
-        list.append(row);
+        list.append(memberRow(id, server));
       }
-      results.replaceChildren(list.children.length ? list : node("p", "", "No matching members."));
+      memberResults.replaceChildren(list.children.length ? list : node("p", "", "No matching members."));
     };
     search.addEventListener("input", () => { memberQuery = search.value; listMembers(); });
     listMembers();
   } else {
-    controls.append(settingsButton("Create channel", () => openCreate("channel")));
     if (!server.channels.length) results.append(node("p", "", "No channels yet."));
     for (const channel of server.channels) {
       const row = node("div", "member-row");
@@ -139,40 +147,15 @@ function showEvents(events) {
   $("#admin-results").append(events.length ? list : node("p", "", "No matching activity yet."));
 }
 
-function notificationSettings() {
-  const controls = $("#admin-controls");
-  const prefs = state.alerts ?? {};
-  function toggle(label, checked, change) {
-    const field = node("label", "admin-check");
-    const input = node("input");
-    input.type = "checkbox";
-    input.checked = checked;
-    input.addEventListener("change", () => {
-      if (isAdmin() && updateState(next => { next.alerts ??= {}; change(next.alerts, input.checked); })) render();
-      else input.checked = checked;
-    });
-    field.append(input, node("span", "", label));
-    controls.append(field);
-  }
-  for (const category of ["Membership", "Mentions"]) {
-    toggle(category === "Mentions" ? "@Admin mentions" : "Membership changes", prefs[category] !== false,
-      (next, checked) => { next[category] = checked; });
-  }
-  for (const server of state.servers) {
-    toggle("Mute " + server.name, !!prefs.muted?.includes(server.id), (next, checked) => {
-      next.muted = (next.muted ?? []).filter(id => id !== server.id);
-      if (checked) next.muted.push(server.id);
-    });
-  }
-  controls.append(settingsButton("Mark all as read", () => {
-    if (updateState(next => { for (const event of inbox(next)) event.read = true; })) render();
-  }));
-  showEvents(inbox(state));
-}
-
 function validAdminData(value) {
   const events = value?.events ?? [];
   const alerts = value?.alerts ?? {};
+  const helpRequests = value?.helpRequests ?? [];
+  if (!Array.isArray(helpRequests) || !helpRequests.every(request => request &&
+    typeof request.id === "string" && Object.hasOwn(demoUsers, request.authorId) && request.authorId !== ADMIN_ID &&
+    typeof request.message === "string" && request.message.trim() && request.message.length <= MAX_HELP_LENGTH &&
+    (request.reply === undefined || (typeof request.reply === "string" && request.reply.length <= MAX_HELP_LENGTH)) &&
+    Number.isFinite(Date.parse(request.createdAt)) && helpStatuses.includes(request.status))) return false;
   return Array.isArray(events) && events.length <= 500 && events.every(e => e &&
     ["id", "actor", "action", "category", "serverId", "server", "time"].every(key => typeof e[key] === "string") &&
     Number.isFinite(Date.parse(e.time)) && typeof e.read === "boolean") &&
@@ -181,61 +164,230 @@ function validAdminData(value) {
     (alerts.muted === undefined || (Array.isArray(alerts.muted) && alerts.muted.every(id => typeof id === "string")));
 }
 
-function replaceWorkspace(next, prompt) {
-  if (!isAdmin() || !window.confirm(prompt)) return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  state = next;
-  storageBlocked = false;
-  workspaceError("");
-  render();
-  $("#admin-status").textContent = "Workspace updated.";
-}
-
 function dataSettings() {
-  const controls = $("#admin-controls");
-  controls.append(node("p", "", "Workspace backups include servers, memberships, messages, drafts, activity and notification preferences. Personal profiles and appearance settings are stored separately in this browser."));
-  controls.append(settingsButton("Export workspace backup", () => {
-    try {
-      const value = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (!validateState(value)) throw Error();
-      const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
-      const link = node("a");
-      link.href = url;
-      link.download = "teamconnect-workspace.json";
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch { $("#admin-status").textContent = "Could not export a valid workspace."; }
-  }));
-  const label = node("label", "admin-field", "Restore workspace backup");
-  const file = node("input");
-  file.type = "file";
-  file.accept = ".json,application/json";
-  file.addEventListener("change", async () => {
-    if (!isAdmin() || !file.files.length) return;
-    try {
-      const value = JSON.parse(await file.files[0].text());
-      if (!validateState(value)) throw Error();
-      replaceWorkspace(removeDefaults(value), "Replace this browser’s workspace with the selected backup?");
-    } catch { $("#admin-status").textContent = "Restore failed. Check the backup format and available browser storage."; }
-    file.value = "";
+  const form = node("form", "change-password-form");
+  form.id = "change-password-form";
+  const heading = node("h2", "", "Change password");
+  const passwordFields = node("div", "password-fields");
+  const fields = [
+    ["Current password", "current-password"],
+    ["New password", "new-password"],
+    ["Confirm new password", "new-password"]
+  ].map(([label, autocomplete], index) => {
+    const field = node("div", "account-row");
+    const input = node("input");
+    input.id = "change-password-" + index;
+    input.type = "password";
+    input.autocomplete = autocomplete;
+    input.required = true;
+    const caption = node("label", "", label);
+    caption.htmlFor = input.id;
+    field.append(caption);
+    if (index < 2) {
+      const control = node("div", "password-visibility");
+      const toggle = node("button", "icon-button password-toggle");
+      toggle.type = "button";
+      toggle.setAttribute("aria-label", "Show " + label.toLowerCase());
+      toggle.setAttribute("aria-controls", input.id);
+      const eye = node("span", "password-eye");
+      eye.setAttribute("aria-hidden", "true");
+      toggle.append(eye);
+      const setVisible = visible => {
+        input.type = visible ? "text" : "password";
+        toggle.setAttribute("aria-pressed", String(visible));
+        toggle.title = (visible ? "Hide " : "Show ") + label.toLowerCase();
+      };
+      setVisible(false);
+      toggle.addEventListener("click", () => setVisible(input.type === "password"));
+      form.addEventListener("reset", () => setVisible(false));
+      control.append(input, toggle);
+      field.append(control);
+    } else {
+      field.append(input);
+    }
+    passwordFields.append(field);
+    return input;
   });
-  label.append(file);
-  controls.append(label, settingsButton("Reset workspace data", () => {
-    try { replaceWorkspace(emptyWorkspace(), "Delete all servers, messages, drafts, memberships and activity in this browser?"); }
-    catch { $("#admin-status").textContent = "Could not reset workspace storage."; }
-  }));
+  const [current, next, confirm] = fields;
+  next.minLength = 8;
+  next.setAttribute("aria-describedby", "new-password-hint");
+  const hint = node("p", "settings-note", "Use at least 8 characters.");
+  hint.id = "new-password-hint";
+  const button = node("button", "button primary", "Save password");
+  button.type = "submit";
+  const feedback = node("p", "message-error");
+  feedback.setAttribute("role", "alert");
+  const actions = node("div", "password-actions");
+  actions.append(hint, button);
+  form.append(passwordFields, feedback, actions);
+  const footer = node("footer", "privacy-footer");
+  for (const title of ["Terms & Conditions", "Privacy Policy"]) {
+    const row = node("div", "privacy-document");
+    const view = node("button", "button secondary", "View");
+    view.type = "button";
+    view.disabled = true;
+    view.setAttribute("aria-label", "View " + title);
+    row.append(node("span", "", title), view);
+    footer.append(row);
+  }
+  $("#admin-results").append(heading, form, footer);
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!isAdmin() || button.disabled) return;
+    const oldPassword = current.value;
+    const newPassword = next.value;
+    const user = currentUser;
+    feedback.textContent = "";
+    $("#admin-status").textContent = "";
+    if (newPassword.length < 8 || newPassword !== confirm.value || oldPassword === newPassword) {
+      feedback.textContent = "Choose a different password of at least 8 characters and enter it twice.";
+      return;
+    }
+    for (const input of fields) input.readOnly = true;
+    button.disabled = true;
+    try {
+      const previous = passwordCredentials(user.id);
+      if (!oldPassword || await passwordDigest(oldPassword, previous.salt) !== previous.digest) {
+        feedback.textContent = "The current password is incorrect.";
+        return;
+      }
+      const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+      const digest = await passwordDigest(newPassword, salt);
+      if (currentUser !== user || !form.isConnected || $("#admin-page").hidden) return;
+      if (passwordCredentials(user.id).digest !== previous.digest) {
+        feedback.textContent = "The password changed in another tab. Enter your current password and try again.";
+        return;
+      }
+      localStorage.setItem(scopedKey(PASSWORD_KEY, user.id), JSON.stringify({ salt, digest }));
+      form.reset();
+      $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
+    } catch {
+      feedback.textContent = "Could not change the password. Check browser storage and try again.";
+    } finally {
+      button.disabled = false;
+      for (const input of fields) input.readOnly = false;
+    }
+  });
 }
 
-function diagnosticSettings() {
-  let storage = "Available";
-  try { localStorage.getItem(STORAGE_KEY); } catch { storage = "Unavailable"; }
-  if (storageBlocked) storage = "Workspace storage error";
-  const report = ["TeamConnect workspace format v" + state.version, "Browser storage: " + storage,
-    "Workspace error: " + ($("#workspace-error").textContent || "None")].join("\n");
-  $("#admin-results").append(node("h2", "", "Keyboard shortcuts"),
-    node("p", "", "Enter sends a message. Shift+Enter starts a new line. Shift+F10 opens options on a focused server or channel. Escape closes settings."),
-    node("h2", "", "Diagnostic report"), node("pre", "", report), settingsButton("Copy report", async () => {
-      try { await navigator.clipboard.writeText(report); $("#admin-status").textContent = "Report copied."; }
-      catch { $("#admin-status").textContent = "Select the report above to copy it."; }
-    }));
+function helpSettings() {
+  let list = $("#help-request-list");
+  if (!list) {
+    const controls = $("#admin-controls");
+    controls.replaceChildren();
+    if (!isAdmin()) controls.append(helpRequestForm());
+
+    const panel = node("section", "help-requests-panel");
+    const heading = node("h2", "", isAdmin() ? "Help requests" : "My requests");
+    heading.id = "help-requests-title";
+    list = node("ul", "help-request-list");
+    list.id = "help-request-list";
+    list.tabIndex = 0;
+    list.setAttribute("aria-labelledby", heading.id);
+    panel.append(heading, list);
+    $("#admin-results").append(panel);
+  }
+
+  const requests = (state.helpRequests ?? []).filter(request => isAdmin() || request.authorId === currentUser.id);
+  const drafts = new Map(Array.from(list.querySelectorAll("[data-help-reply]"), input => [input.dataset.helpReply, input]));
+  const focused = document.activeElement;
+  list.replaceChildren(...(requests.length
+    ? requests.slice().reverse().map(request => helpRequestRow(request, drafts.get(request.id)))
+    : [node("li", "", "No help requests yet.")]));
+  if (focused?.matches("[data-help-reply]") && list.contains(focused)) focused.focus({ preventScroll: true });
+}
+
+function helpRequestForm() {
+  const form = node("form", "help-request-form");
+  form.id = "help-request-form";
+  const label = node("label", "admin-field", "What do you need help with?");
+  const message = node("textarea");
+  message.rows = 4;
+  message.required = true;
+  message.maxLength = MAX_HELP_LENGTH;
+  label.append(message);
+  const submit = node("button", "button primary", "Send request");
+  submit.type = "submit";
+  form.append(label, submit);
+
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (!currentUser || isAdmin() || !form.isConnected) return;
+    const text = message.value.trim();
+    if (!text || text.length > MAX_HELP_LENGTH) {
+      $("#admin-status").textContent = "Enter a request of 1–1,000 characters.";
+      return;
+    }
+    const request = { id: id(), authorId: currentUser.id, message: text,
+      createdAt: new Date().toISOString(), status: "Pending" };
+    if (!updateState(next => {
+      next.helpRequests ??= [];
+      next.helpRequests.push(request);
+    })) {
+      $("#admin-status").textContent = "Could not save your request. Try again.";
+      return;
+    }
+    form.reset();
+    helpSettings();
+    $("#admin-status").textContent = "Request sent to the workspace admin.";
+  });
+  return form;
+}
+
+function helpRequestRow(request, draft) {
+  const row = node("li", "help-request");
+  const header = node("div", "help-request-heading");
+  const date = new Date(request.createdAt);
+  const time = node("time", "", date.toLocaleString());
+  time.dateTime = request.createdAt;
+  const author = loadUser(request.authorId);
+  const status = node("span", "help-status", request.status);
+  status.setAttribute("data-status", request.status.toLowerCase());
+  header.append(node("strong", "", author.name), status);
+  row.append(header, time, node("p", "help-request-message", request.message));
+  if (request.reply) {
+    const reply = node("div", "help-saved-reply");
+    reply.append(node("strong", "", "Admin reply"), node("p", "help-request-message", request.reply));
+    row.append(reply);
+  }
+  if (isAdmin() && request.status === "Pending") {
+    const reply = draft ?? node("textarea");
+    reply.className = "help-reply-field";
+    reply.dataset.helpReply = request.id;
+    reply.maxLength = MAX_HELP_LENGTH;
+    reply.placeholder = "Write a reply…";
+    reply.setAttribute("aria-label", "Reply to employee (optional)");
+    const actions = node("div", "help-actions");
+    for (const decision of ["Resolved", "Rejected"]) {
+      const button = settingsButton(decision, () => reviewHelpRequest(request.id, decision, reply.value.trim()));
+      button.classList.add(decision === "Resolved" ? "help-resolve" : "help-reject");
+      actions.append(button);
+    }
+    row.append(reply, actions);
+  }
+  return row;
+}
+
+function reviewHelpRequest(requestId, decision, reply) {
+  if (!isAdmin() || !["Resolved", "Rejected"].includes(decision)) return;
+  if (reply.length > MAX_HELP_LENGTH) {
+    $("#admin-status").textContent = "Keep your reply to 1,000 characters or fewer.";
+    return;
+  }
+  let reviewed = false;
+  const saved = updateState(next => {
+    const request = next.helpRequests?.find(entry => entry.id === requestId);
+    if (request?.status !== "Pending") return;
+    request.status = decision;
+    if (reply) request.reply = reply;
+    reviewed = true;
+  });
+  if (saved) {
+    helpSettings();
+    $("#admin-title").focus();
+  }
+  $("#admin-status").textContent = saved
+    ? (reviewed ? "Request marked " + decision.toLowerCase() + "." : "This request has already been reviewed.")
+    : "Could not update the request. Try again.";
 }
