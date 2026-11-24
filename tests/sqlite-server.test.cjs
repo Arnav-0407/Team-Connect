@@ -5,7 +5,7 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { once } = require("node:events");
 const { openDatabase, accounts } = require("../server/database.cjs");
-const { createTeamConnectServer } = require("../server/index.cjs");
+const { backendConfig, createTeamConnectServer } = require("../server/index.cjs");
 
 const [admin, arnav, parth] = accounts;
 const change = (kind, id, after, before = null) => ({ kind, id, before, after });
@@ -70,7 +70,7 @@ test("SQLite serves live updates and keeps authorized chat history across a rest
   const commit = (cookie, ...changes) => call("/api/changes", { cookie, body: { changes } });
   const snapshot = async cookie => (await call("/api/workspace", { cookie })).json();
   const config = await call("/js/backendConfig.js");
-  assert.match(await config.text(), /backend: "sqlite"/);
+  assert.match(await config.text(), /"backend":"sqlite"/);
   assert.equal((await call("/.data/team-connect.sqlite")).status, 404);
   assert.equal((await call("/api/workspace")).status, 401);
   assert.equal((await call("/api/sign-in", { requestOrigin: "https://other.example", body: {} })).status, 403);
@@ -161,4 +161,34 @@ test("browser export import preserves history and rejects conflicting copies", a
   const conflict = runImport();
   assert.equal(conflict.status, 1);
   assert.match(conflict.stderr, /Import conflicts/);
+});
+
+test("Supabase mode serves the browser SDK and public config without starting the SQLite API", async t => {
+  const env = {
+    SUPABASE_URL: "https://example.supabase.co",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example_key_for_test",
+    SUPABASE_SECRET_KEY: "private-test-key"
+  };
+  const config = backendConfig(env);
+  assert.deepEqual(config, { backend: "supabase", url: env.SUPABASE_URL, publishableKey: env.SUPABASE_PUBLISHABLE_KEY });
+  assert.deepEqual(backendConfig({ ...env, TEAM_CONNECT_BACKEND: "sqlite" }), { backend: "sqlite" });
+  assert.throws(() => backendConfig({ ...env, SUPABASE_URL: "https://example.invalid" }), /Supabase project URL/);
+  const server = createTeamConnectServer({ config });
+  const listening = once(server, "listening");
+  server.listen(0, "127.0.0.1");
+  await listening;
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = "http://127.0.0.1:" + server.address().port;
+  const options = { signal: AbortSignal.timeout(5000) };
+  const [configResponse, sdk, sqlite] = await Promise.all([
+    fetch(origin + "/js/backendConfig.js", options),
+    fetch(origin + "/js/supabase-sdk.js", { ...options, method: "HEAD" }),
+    fetch(origin + "/api/session", options)
+  ]);
+  const source = await configResponse.text();
+  assert.match(source, /"backend":"supabase"/);
+  assert.match(source, /sb_publishable_example_key_for_test/);
+  assert.doesNotMatch(source, /private-test-key/);
+  assert.equal(sdk.status, 200);
+  assert.equal(sqlite.status, 404);
 });

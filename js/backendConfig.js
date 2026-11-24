@@ -1,2 +1,1 @@
-// The Node server serves its SQLite configuration at this URL.
-// A static copy of the site runs the original local-only demo.
+// The Node server injects configuration here. npm run prepare:live-server supplies it for Live Server.

@@ -234,13 +234,13 @@ function dataSettings() {
 
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    if (!isAdmin() || button.disabled) return;
+    if (!cloud || !isAdmin() || button.disabled) return;
     const oldPassword = current.value;
     const newPassword = next.value;
     const user = currentUser;
     feedback.textContent = "";
     $("#admin-status").textContent = "";
-    const minimumLength = cloudEnabled ? 12 : 8;
+    const minimumLength = 12;
     if (newPassword.length < minimumLength || newPassword !== confirm.value || oldPassword === newPassword) {
       feedback.textContent = `Choose a different password of at least ${minimumLength} characters and enter it twice.`;
       return;
@@ -248,35 +248,17 @@ function dataSettings() {
     for (const input of fields) input.readOnly = true;
     button.disabled = true;
     try {
-      if (cloudEnabled) {
-        await cloud.changePassword(cloudAccounts[user.id].email, oldPassword, newPassword);
-        if (currentUser === user) {
-          form.reset();
-          $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
-        }
-        return;
+      await cloud.changePassword(cloudAccounts[user.id].email, oldPassword, newPassword);
+      if (currentUser === user) {
+        form.reset();
+        $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
       }
-      const previous = passwordCredentials(user.id);
-      if (!oldPassword || await passwordDigest(oldPassword, previous.salt) !== previous.digest) {
-        feedback.textContent = "The current password is incorrect.";
-        return;
-      }
-      const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
-      const digest = await passwordDigest(newPassword, salt);
-      if (currentUser !== user || !form.isConnected || $("#admin-page").hidden) return;
-      if (passwordCredentials(user.id).digest !== previous.digest) {
-        feedback.textContent = "The password changed in another tab. Enter your current password and try again.";
-        return;
-      }
-      localStorage.setItem(scopedKey(PASSWORD_KEY, user.id), JSON.stringify({ salt, digest }));
-      form.reset();
-      $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
     } catch (error) {
       if (error.code === "invalid_credentials") {
         feedback.textContent = "The current password is incorrect.";
         return;
       }
-      feedback.textContent = "Could not change the password. Check browser storage and try again.";
+      feedback.textContent = "Could not change the password. Check your connection and try again.";
     } finally {
       button.disabled = false;
       for (const input of fields) input.readOnly = false;

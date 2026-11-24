@@ -23,7 +23,7 @@ function localHistory() {
   ] };
 }
 
-function boot({ saved = new Map([[workspaceKey, JSON.stringify(localHistory())]]), failWrites = false, sdk } = {}) {
+function boot({ saved = new Map([[workspaceKey, JSON.stringify(localHistory())]]), failWrites = false, sdk, backend = "sqlite", showLocalHistory = true } = {}) {
   class Element {
     constructor() {
       this.children = [];
@@ -78,25 +78,28 @@ function boot({ saved = new Map([[workspaceKey, JSON.stringify(localHistory())]]
   let blockWrites = false;
   const storage = {
     getItem: key => saved.get(key) ?? null,
+    removeItem: key => saved.delete(key),
     setItem: (key, value) => {
       if (blockWrites) throw Error("Storage full");
       saved.set(key, value);
     }
   };
+  const oldSession = new Map([["teamconnect.demo-session.v2", adminId]]);
   const context = vm.createContext({
     document, localStorage: storage,
-    sessionStorage: { getItem: () => adminId, setItem() {} },
+    sessionStorage: { getItem: key => oldSession.get(key), removeItem: key => oldSession.delete(key) },
     window: { addEventListener() {}, confirm: () => true },
     crypto: require("node:crypto").webcrypto,
     structuredClone, URL, setTimeout, clearTimeout, setInterval() {},
-    teamConnectConfig: sdk && { backend: "sqlite" },
+    teamConnectConfig: sdk && { backend },
     teamConnectTestBackend: sdk
   });
   sources.forEach(source => vm.runInContext(source, context));
-  blockWrites = failWrites;
   const run = code => vm.runInContext(code, context);
+  if (!sdk && showLocalHistory) run('changeSession(loadUser("user-arnav"))');
+  blockWrites = failWrites;
   return {
-    elements, saved, run,
+    elements, saved, oldSession, run,
     click: selector => document.querySelector(selector).fire("click"),
     async create(mode, name) {
       await this.click(mode === "server" ? "#add-server" : "#add-channel");
@@ -114,6 +117,19 @@ function boot({ saved = new Map([[workspaceKey, JSON.stringify(localHistory())]]
     state: () => sdk ? JSON.parse(run("JSON.stringify(state)")) : JSON.parse(saved.get(workspaceKey))
   };
 }
+
+test("retired browser credentials are removed and local history is preserved", async () => {
+  const history = JSON.stringify(localHistory());
+  const saved = new Map([[workspaceKey, history], ["teamconnect.password.v1", "old-admin-hash"],
+    ["teamconnect.password.v1.employee-arnav", "old-employee-hash"]]);
+  const app = boot({ saved, showLocalHistory: false });
+  assert.equal(app.saved.has("teamconnect.password.v1"), false);
+  assert.equal(app.saved.has("teamconnect.password.v1.employee-arnav"), false);
+  assert.equal(app.oldSession.size, 0);
+  assert.equal(app.saved.get(workspaceKey), history);
+  assert.equal(app.elements["#sign-in-submit"].disabled, true);
+  assert.equal(app.run("currentUser"), null);
+});
 
 test("servers isolate history and drafts and restore the selected channel locally", async () => {
   const app = boot();
@@ -198,12 +214,12 @@ function fakeBackend() {
   let loseResponse = false;
   return {
     loseResponse() { loseResponse = true; },
-    sdk(account) {
+    sdk(account, authId) {
       return {
-        getSession: async () => ({ user: { id: account } }),
+        getSession: async () => ({ user: { id: authId ?? account } }),
         onAuthChange() {},
         snapshot: async () => ({
-          account, accounts, revision,
+          account, authId, accounts, revision,
           records: structuredClone([...records.values()].filter(record => record.kind !== "draft" || record.data.owner === account))
         }),
         commit: async changes => {
@@ -273,4 +289,20 @@ test("retrying a send after a lost acknowledgement does not duplicate the messag
   await pendingUi();
   assert.equal(app.state().servers[0].channels[0].messages.length, 1);
   assert.equal(app.elements["#message-input"].value, "");
+});
+
+test("Supabase sessions use the Auth UUID while messages retain the existing account ID", async () => {
+  const backend = fakeBackend();
+  const authId = "00000000-0000-4000-8000-000000000001";
+  const options = { sdk: backend.sdk(adminId, authId), backend: "supabase" };
+  const app = boot(options);
+  await pendingUi();
+  await app.create("server", "Launch");
+  await app.create("channel", "general");
+  await app.send("Keep the existing author");
+  await pendingUi();
+  assert.equal(app.state().servers[0].channels[0].messages[0].authorId, adminId);
+  const reopened = boot(options);
+  await pendingUi();
+  assert.equal(reopened.state().servers[0].channels[0].messages[0].text, "Keep the existing author");
 });
