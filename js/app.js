@@ -1,5 +1,21 @@
 const STORAGE_KEY = "teamconnect.workspace.v1";
 const MAX_MESSAGE_LENGTH = 2000;
+const cloudConfig = globalThis.teamConnectConfig;
+const cloudEnabled = cloudConfig?.backend === "sqlite";
+let cloud;
+let cloudAccounts = {};
+let cloudProfiles = new Map();
+let cloudAuthId = null;
+let cloudRevision = null;
+let cloudUnsubscribe;
+let cloudQueue = Promise.resolve();
+let refreshPending = false;
+let refreshAgain = false;
+let cloudSessionVersion = 0;
+let messageSending = false;
+const pendingDrafts = new Map();
+const pendingMessages = new Map();
+let openingSession;
 const PASSWORD_KEY = "teamconnect.password.v1";
 const PROFILE_KEY = "teamconnect.profile.v1";
 const PRESENCE_KEY = "teamconnect.presence";
@@ -34,10 +50,12 @@ function scopedKey(key, userId) {
   return userId === ADMIN_ID ? key : `${key}.${userId}`;
 }
 function loadUser(userId) {
-  if (!Object.hasOwn(demoUsers, userId)) return null;
-  const user = { id: userId, name: demoUsers[userId].name, role: demoUsers[userId].role, email: demoUsers[userId].email, designation: "", photo: "" };
+  const accounts = cloudEnabled ? cloudAccounts : demoUsers;
+  if (!Object.hasOwn(accounts, userId)) return null;
+  const account = accounts[userId];
+  const user = { id: userId, name: account.name, role: account.role, email: account.email, designation: "", photo: "" };
   try {
-    const profile = JSON.parse(localStorage.getItem(scopedKey(PROFILE_KEY, userId)));
+    const profile = cloudEnabled ? cloudProfiles.get(userId) : JSON.parse(localStorage.getItem(scopedKey(PROFILE_KEY, userId)));
     if (typeof profile?.name === "string" && profile.name.trim() && profile.name.length <= 60) user.name = profile.name.trim();
     if (typeof profile?.email === "string" && profile.email.length <= 254) user.email = profile.email;
     if (typeof profile?.designation === "string" && profile.designation.length <= MAX_DESIGNATION_LENGTH) {
@@ -51,13 +69,13 @@ function loadUser(userId) {
 }
 let userId = null;
 try {
-  userId = sessionStorage.getItem(DEMO_SESSION_KEY);
+  if (!cloudEnabled) userId = sessionStorage.getItem(DEMO_SESSION_KEY);
 } catch { /* Sign in again when session storage is unavailable. */ }
 let currentUser = loadUser(userId);
-function isAdmin() { return currentUser?.id === ADMIN_ID; }
+function isAdmin() { return currentUser?.role === "Workspace Admin"; }
 function loadPresence(userId = currentUser?.id) {
   try {
-    const saved = userId && localStorage.getItem(scopedKey(PRESENCE_KEY, userId));
+    const saved = userId && (cloudEnabled ? cloudProfiles.get(userId)?.presence : localStorage.getItem(scopedKey(PRESENCE_KEY, userId)));
     if (Object.hasOwn(presenceOptions, saved)) return saved;
   } catch { /* Use the default status if browser storage is unavailable. */ }
   return "active";
@@ -79,7 +97,7 @@ function id() {
   return globalThis.crypto?.randomUUID?.() || `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 function makeChannel(name, messages = []) {
-  return { id: id(), name, messages, draft: "" };
+  return { id: id(), name, messages, draft: "", createdAt: new Date().toISOString() };
 }
 function makeServer(name) {
   return {
@@ -135,7 +153,7 @@ function validateState(value) {
   return value.servers.every((server) => server && unique(server.id) &&
     typeof server.name === "string" && server.name.trim() && Array.isArray(server.channels) &&
     (server.memberIds === undefined || (Array.isArray(server.memberIds) && server.memberIds.includes(ADMIN_ID) &&
-      server.memberIds.every(id => Object.hasOwn(demoUsers, id)) && new Set(server.memberIds).size === server.memberIds.length)) &&
+      server.memberIds.every(id => Object.hasOwn(cloudEnabled ? cloudAccounts : demoUsers, id)) && new Set(server.memberIds).size === server.memberIds.length)) &&
     server.channels.every((channel) => channel && unique(channel.id) && typeof channel.name === "string" && channel.name.trim() &&
       (channel.archived === undefined || typeof channel.archived === "boolean") &&
       (channel.drafts === undefined || (channel.drafts && typeof channel.drafts === "object" &&
@@ -169,7 +187,7 @@ function loadState() {
     return emptyWorkspace();
   }
 }
-let state = loadState();
+let state = cloudEnabled ? emptyWorkspace() : loadState();
 function memberIds(server) {
   // Before membership was stored, every account could access every server.
   return server.memberIds ?? Object.keys(demoUsers);
@@ -183,6 +201,7 @@ function activeServer() {
 function activeChannel() { return activeServer()?.channels.find((channel) => channel.id === activeServer().activeChannelId); }
 function updateState(change) {
   if (storageBlocked) return false;
+  if (cloudEnabled) return updateCloudState(change);
   try {
     // Read the latest workspace so another tab's messages are preserved.
     const latest = JSON.parse(localStorage.getItem(STORAGE_KEY));
@@ -198,6 +217,169 @@ function updateState(change) {
     return false;
   }
 }
+function queueCloud(action) {
+  const authId = cloudAuthId;
+  const version = cloudSessionVersion;
+  const isCurrent = () => Boolean(authId && version === cloudSessionVersion);
+  const result = cloudQueue.then(() => isCurrent() ? action(authId, isCurrent) : false);
+  cloudQueue = result.catch(() => {});
+  return result;
+}
+
+function applyCloudSnapshot(snapshot) {
+  cloudAccounts = snapshot.accounts;
+  cloudProfiles = new Map(snapshot.records.filter(record => record.kind === "profile").map(record => [record.id, record.data]));
+  cloudRevision = snapshot.revision;
+  state = cloudWorkspaceState(snapshot.records, snapshot.account, state);
+}
+
+function refreshCloud() {
+  if (!cloudAuthId || !currentUser) return;
+  if (refreshPending) {
+    refreshAgain = true;
+    return;
+  }
+  refreshPending = true;
+  void queueCloud(async (authId, isCurrent) => {
+    try {
+      if (await cloud.revision(authId) === cloudRevision) return;
+      const snapshot = await cloud.snapshot();
+      if (!isCurrent()) return;
+      if (snapshot.account !== authId) { await openCloudSession({ user: { id: snapshot.account } }); return; }
+      const channelId = activeChannel()?.id;
+      const scroll = messageList.scrollTop;
+      const atBottom = messageList.scrollHeight - messageList.clientHeight - scroll < 48;
+      applyCloudSnapshot(snapshot);
+      Object.assign(currentUser, loadUser(snapshot.account));
+      presence = loadPresence();
+      appearance = loadAppearance();
+      renderProfile();
+      renderPresence();
+      renderAppearance();
+      render();
+      if (!atBottom && channelId === activeChannel()?.id) messageList.scrollTop = scroll;
+    } catch (error) {
+      if (error.status === 401 && isCurrent()) {
+        const session = await cloud.getSession().catch(() => null);
+        if (isCurrent()) await openCloudSession(session).catch(() => {});
+      }
+      // A dropped connection is retried by the next subscription event or revision check.
+    }
+  }).finally(() => {
+    refreshPending = false;
+    if (refreshAgain) {
+      refreshAgain = false;
+      refreshCloud();
+    }
+  });
+}
+
+function updateCloudState(change) {
+  return queueCloud(async (_authId, isCurrent) => {
+    const next = structuredClone(state);
+    try {
+      change(next);
+      if (!validateState(next)) throw new Error("Invalid update");
+      const accounts = Object.keys(cloudAccounts);
+      const before = cloudWorkspaceRecords(state, currentUser.id, accounts);
+      const after = cloudWorkspaceRecords(next, currentUser.id, accounts);
+      const changes = cloudRecordChanges(before, after);
+      if (changes.length) await cloud.commit(changes);
+      if (!isCurrent()) return false;
+      state = next;
+      workspaceError("");
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      workspaceError(error?.code === "40001"
+        ? "This changed in another browser. Check the latest version and try again."
+        : "Could not save to Team Connect. Check your connection or access and try again.");
+      refreshCloud();
+      return false;
+    }
+  });
+}
+
+function saveAccountSetting(key, userId, value) {
+  if (!cloudEnabled) {
+    localStorage.setItem(scopedKey(key, userId), key === PRESENCE_KEY ? value : JSON.stringify(value));
+    return;
+  }
+  return queueCloud(async (_authId, isCurrent) => {
+    if (currentUser?.id !== userId) throw new Error("Account changed");
+    const before = cloudProfiles.get(userId) ?? null;
+    const fields = key === PROFILE_KEY ? value : { [key === PRESENCE_KEY ? "presence" : "appearance"]: value };
+    const after = { ...before, ...fields };
+    await cloud.commit([{ kind: "profile", id: userId, before, after }]);
+    if (!isCurrent()) throw new Error("Account changed");
+    cloudProfiles.set(userId, after);
+  });
+}
+
+function openCloudSession(session) {
+  const authId = session?.user?.id ?? null;
+  if (openingSession?.authId === authId) return openingSession.promise;
+  if (authId === cloudAuthId && (!authId || currentUser) && !openingSession) return Promise.resolve();
+  const attempt = { authId };
+  openingSession = attempt;
+  attempt.promise = finishCloudSession(attempt).finally(() => {
+    if (openingSession === attempt) openingSession = undefined;
+  });
+  return attempt.promise;
+}
+
+async function finishCloudSession(attempt) {
+  const { authId } = attempt;
+  cloudSessionVersion += 1;
+  if (currentUser && cloudAuthId !== authId) changeSession(null);
+  cloudUnsubscribe?.();
+  cloudUnsubscribe = undefined;
+  for (const draft of pendingDrafts.values()) clearTimeout(draft.timer);
+  pendingDrafts.clear();
+  pendingMessages.clear();
+  cloudAuthId = authId;
+  cloudRevision = null;
+  cloudProfiles.clear();
+  cloudAccounts = {};
+  state = emptyWorkspace();
+  if (!authId) return;
+  let snapshot;
+  try {
+    snapshot = await cloud.snapshot();
+  } catch (error) {
+    if (openingSession === attempt) cloudAuthId = null;
+    throw error;
+  }
+  if (openingSession !== attempt) return;
+  if (snapshot.account !== authId) throw new Error("The account changed while signing in.");
+  applyCloudSnapshot(snapshot);
+  changeSession(loadUser(snapshot.account));
+  cloudUnsubscribe = cloud.subscribe(authId, refreshCloud);
+}
+
+async function startCloud() {
+  const submit = $("#sign-in-submit");
+  submit.disabled = true;
+  try {
+    cloud = globalThis.teamConnectTestBackend ?? createCloudWorkspace();
+    cloud.onAuthChange((event, session) => {
+      if (event === "SIGNED_OUT" || (event === "SIGNED_IN" && session?.user?.id !== cloudAuthId)) {
+        void openCloudSession(session).catch(() => {
+          $("#sign-in-error").textContent = "Could not open Team Connect for this account.";
+        });
+      }
+    });
+    window.addEventListener("online", refreshCloud);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshCloud(); });
+    setInterval(() => { if (!document.hidden) refreshCloud(); }, 15000);
+    await openCloudSession(await cloud.getSession());
+  } catch {
+    $("#sign-in-error").textContent = "Could not connect to Team Connect. Check that the Team Connect server is running and try again.";
+  } finally {
+    submit.disabled = !cloud;
+  }
+}
+
 function node(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -226,7 +408,7 @@ function renderMessages() {
   const channel = activeChannel();
   messageList.replaceChildren();
   if (!channel || !currentUser) return;
-  const profiles = new Map(Object.keys(demoUsers).map((id) => [id, id === currentUser.id ? currentUser : loadUser(id)]));
+  const profiles = new Map(Object.keys(cloudEnabled ? cloudAccounts : demoUsers).map((id) => [id, id === currentUser.id ? currentUser : loadUser(id)]));
   const messages = [...channel.messages].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const message of messages) {
     const own = message.authorId === currentUser.id;
@@ -356,15 +538,15 @@ presenceTrigger.addEventListener("click", () => {
   presenceTrigger.setAttribute("aria-expanded", "true");
   $(`#presence-${presence}`).focus();
 });
-presencePicker.addEventListener("change", (event) => {
+presencePicker.addEventListener("change", async (event) => {
   const selected = event.target.value;
   if (!currentUser || !Object.hasOwn(presenceOptions, selected)) return;
   try {
-    localStorage.setItem(scopedKey(PRESENCE_KEY, currentUser.id), selected);
+    await saveAccountSetting(PRESENCE_KEY, currentUser.id, selected);
     presence = selected;
     presenceError.textContent = "";
   } catch {
-    presenceError.textContent = "Could not save your status. Check browser storage and try again.";
+    presenceError.textContent = "Could not save your status. Check your connection or storage and try again.";
   }
   renderPresence();
   refreshMemberStatuses(scopedKey(PRESENCE_KEY, currentUser.id));
@@ -421,7 +603,7 @@ for (const page of [accountPage, $("#admin-page")]) {
 function loadAppearance() {
   let saved;
   try {
-    if (currentUser) saved = JSON.parse(localStorage.getItem(scopedKey(APPEARANCE_KEY, currentUser.id)));
+    if (currentUser) saved = cloudEnabled ? cloudProfiles.get(currentUser.id)?.appearance : JSON.parse(localStorage.getItem(scopedKey(APPEARANCE_KEY, currentUser.id)));
   } catch { /* Use defaults if browser storage is unavailable or invalid. */ }
   return Object.fromEntries(Object.entries(appearanceOptions).map(([name, choices]) => [
     name, choices.includes(saved?.[name]) ? saved[name] : choices[0]
@@ -450,16 +632,16 @@ themeTrigger.addEventListener("click", () => {
   themeTrigger.setAttribute("aria-expanded", "true");
   themePanel.querySelector(":checked")?.focus();
 });
-themePanel.addEventListener("change", event => {
+themePanel.addEventListener("change", async event => {
   const { value } = event.target;
   if (!currentUser || !appearanceOptions.theme.includes(value)) return;
   const next = { ...loadAppearance(), theme: value };
   try {
-    localStorage.setItem(scopedKey(APPEARANCE_KEY, currentUser.id), JSON.stringify(next));
+    await saveAccountSetting(APPEARANCE_KEY, currentUser.id, next);
     appearance = next;
     themeError.textContent = "";
   } catch {
-    themeError.textContent = "Could not save your theme. Check browser storage and try again.";
+    themeError.textContent = "Could not save your theme. Check your connection or storage and try again.";
   }
   renderAppearance();
 });
@@ -538,7 +720,8 @@ profileForm.addEventListener("submit", async (event) => {
   if (user !== currentUser) return;
   try {
     const profile = { name, email, designation, photo };
-    localStorage.setItem(scopedKey(PROFILE_KEY, user.id), JSON.stringify(profile));
+    await saveAccountSetting(PROFILE_KEY, user.id, profile);
+    if (user !== currentUser) return;
     Object.assign(currentUser, profile);
     photoInput.value = "";
     removePhoto = false;
@@ -548,7 +731,7 @@ profileForm.addEventListener("submit", async (event) => {
     profileError.textContent = "";
     profileStatus.textContent = "Profile updated.";
   } catch {
-    profileError.textContent = "Could not save your profile. Check browser storage and try again.";
+    profileError.textContent = "Could not save your profile. Check your connection or storage and try again.";
   }
 });
 function renderSession() {
@@ -566,7 +749,7 @@ function renderSession() {
 function changeSession(user) {
   currentUser = user;
   try {
-    sessionStorage.setItem(DEMO_SESSION_KEY, user?.id ?? "signed-out");
+    if (!cloudEnabled) sessionStorage.setItem(DEMO_SESSION_KEY, user?.id ?? "signed-out");
   } catch { /* The demo still works until the page reloads. */ }
   closeProfileMenu();
   closeSettingsPages();
@@ -601,7 +784,16 @@ async function passwordDigest(password, salt) {
   return hex(new Uint8Array(bits));
 }
 
-$("#log-out").addEventListener("click", () => changeSession(null));
+$("#log-out").addEventListener("click", async () => {
+  if (!cloudEnabled) return changeSession(null);
+  try {
+    await Promise.all([...pendingDrafts.keys()].map(saveCloudDraft));
+    await cloud.signOut();
+    await openCloudSession(null);
+  } catch {
+    workspaceError("Could not sign out. Check your connection and try again.");
+  }
+});
 $("#demo-sign-in-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = $("#sign-in-submit");
@@ -612,6 +804,12 @@ $("#demo-sign-in-form").addEventListener("submit", async (event) => {
   submit.disabled = true;
   error.textContent = "";
   try {
+    if (cloudEnabled) {
+      const { session } = await cloud.signIn(email, password.value);
+      await openCloudSession(session);
+      password.value = "";
+      return;
+    }
     const match = Object.entries(demoUsers).find(([, account]) => account.email.toLowerCase() === email);
     if (match) {
       const [id] = match;
@@ -625,7 +823,12 @@ $("#demo-sign-in-form").addEventListener("submit", async (event) => {
     }
     error.textContent = "The email or password is incorrect.";
     password.focus();
-  } catch {
+  } catch (reason) {
+    if (cloudEnabled) {
+      error.textContent = reason?.code === "invalid_credentials" ? "The email or password is incorrect."
+        : "Could not open Team Connect. Check your connection and workspace access.";
+      return;
+    }
     error.textContent = "Password verification is unavailable. Check browser storage and open TeamConnect using HTTPS or localhost.";
   } finally {
     submit.disabled = false;
@@ -697,10 +900,10 @@ function messageChannel(workspace, { serverId, channelId }) {
   return workspace.servers.find((server) => server.id === serverId && canAccess(server))
     ?.channels.find((channel) => channel.id === channelId);
 }
-function changeMessage(target, change, allowModeration = false) {
+async function changeMessage(target, change, allowModeration = false) {
   if (!currentUser) return "Sign in to change messages.";
   let changed = false;
-  const saved = updateState((latest) => {
+  const saved = await updateState((latest) => {
     const channel = messageChannel(latest, target);
     if (!channel || channel.archived) return;
     const index = channel.messages.findIndex((message) =>
@@ -711,14 +914,14 @@ function changeMessage(target, change, allowModeration = false) {
       if (changed && allowModeration) recordEvent(latest, serverFor(latest, target.serverId), "Moderation", "Removed a message in #" + channel.name);
     }
   });
-  if (!saved) return "Could not save your changes. Check browser storage and try again.";
+  if (!saved) return "Could not save your changes. Check your connection or storage and try again.";
   if (!changed) return "This message was changed or removed. Reopen its options to try again.";
   return "";
 }
-function deleteServer(serverId) {
+async function deleteServer(serverId) {
   const server = state.servers.find((entry) => entry.id === serverId);
   if (!isAdmin() || storageBlocked || !server || !window.confirm(`Delete server “${server.name}” and all its channels and messages? This cannot be undone.`)) return;
-  if (updateState((next) => {
+  if (await updateState((next) => {
     recordEvent(next, server, "Servers", "Deleted server");
     next.servers = next.servers.filter((entry) => entry.id !== serverId);
     if (next.activeServerId === serverId) next.activeServerId = next.servers[0]?.id ?? null;
@@ -728,11 +931,11 @@ function deleteServer(serverId) {
     $("#message-status").textContent = `Server ${server.name} deleted.`;
   }
 }
-function deleteChannel(serverId, channelId) {
+async function deleteChannel(serverId, channelId) {
   const server = state.servers.find((entry) => entry.id === serverId);
   const channel = server?.channels.find((entry) => entry.id === channelId);
   if (!isAdmin() || storageBlocked || !channel || !window.confirm(`Delete channel #${channel.name} and all its messages? This cannot be undone.`)) return;
-  if (updateState((next) => {
+  if (await updateState((next) => {
     const target = next.servers.find((entry) => entry.id === serverId);
     if (!target) return;
     recordEvent(next, target, "Channels", "Deleted #" + channel.name);
@@ -751,12 +954,12 @@ archiveChannelOption.addEventListener("click", () => {
   closeContextMenu(true);
   if (channel) setChannelArchived(target.serverId, target.channelId, !channel.archived);
 });
-function setChannelArchived(serverId, channelId, archive) {
+async function setChannelArchived(serverId, channelId, archive) {
   const target = { serverId, channelId };
   const channel = messageChannel(state, target);
   if (!isAdmin() || !channel) return;
   if (archive && !window.confirm(`Archive #${channel.name} and make it read-only?`)) return;
-  if (updateState((latest) => {
+  if (await updateState((latest) => {
     const savedChannel = messageChannel(latest, target);
     if (savedChannel && Boolean(savedChannel.archived) !== archive) {
       savedChannel.archived = archive;
@@ -787,8 +990,8 @@ function render() {
     });
     button.setAttribute("aria-label", entry.name);
     button.setAttribute("aria-pressed", String(entry.id === server?.id));
-    button.addEventListener("click", () => {
-      if (updateState((next) => { next.activeServerId = entry.id; })) {
+    button.addEventListener("click", async () => {
+      if (await updateState((next) => { next.activeServerId = entry.id; })) {
         closeSettingsPages();
         render();
         $("#message-status").textContent = `Switched to ${entry.name}.`;
@@ -805,8 +1008,8 @@ function render() {
     button.append(hash, node("span", "", entry.name));
     if (entry.archived) button.append(node("small", "channel-archived", "Archived"));
     if (entry.id === channel?.id) button.setAttribute("aria-current", "page");
-    button.addEventListener("click", () => {
-      if (updateState((next) => { next.servers.find((s) => s.id === server.id).activeChannelId = entry.id; })) {
+    button.addEventListener("click", async () => {
+      if (await updateState((next) => { next.servers.find((s) => s.id === server.id).activeChannelId = entry.id; })) {
         closeSettingsPages();
         render(); closeSidebar(); messageInput.focus();
       }
@@ -824,7 +1027,7 @@ function render() {
   chat.setAttribute("aria-label", channel ? `Chat: ${channel.name}` : "Chat");
   $("#composer-label").textContent = channel ? `#${channel.name}` : "";
   messageInput.placeholder = channel ? `Message #${channel.name}…` : "";
-  messageInput.value = (isAdmin() ? channel?.draft : channel?.drafts?.[currentUser?.id]) ?? "";
+  messageInput.value = pendingDrafts.get(channel?.id)?.text ?? (isAdmin() ? channel?.draft : channel?.drafts?.[currentUser?.id]) ?? "";
   messageForm.style.visibility = channel ? "visible" : "hidden";
   messageForm.setAttribute("aria-hidden", String(!channel));
   messageForm.inert = !channel;
@@ -838,7 +1041,7 @@ function render() {
   channelNavigation.inert = !server;
   $("#add-channel").hidden = !isAdmin();
   $("#add-channel").disabled = storageBlocked || !server;
-  messageForm.querySelector("button").disabled = messageInput.disabled;
+  messageForm.querySelector("button").disabled = messageInput.disabled || messageSending;
   $("#message-error").textContent = "";
   renderMessages();
   document.title = channel ? `${server.name} · #${channel.name} | TeamConnect` : server ? `${server.name} | TeamConnect` : "TeamConnect";
@@ -892,24 +1095,25 @@ function openAddMember(serverId) {
   addMemberDialog.showModal();
 }
 $("#cancel-add-member").addEventListener("click", () => addMemberDialog.close());
-$("#add-member-form").addEventListener("submit", event => {
+$("#add-member-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (!isAdmin() || !addMemberDialog.open) return;
   const email = $("#member-email").value.trim().toLowerCase();
-  const id = Object.keys(demoUsers).find(id => demoUsers[id].email.toLowerCase() === email);
+  const directory = cloudEnabled ? cloudAccounts : demoUsers;
+  const id = Object.keys(directory).find(id => directory[id].email.toLowerCase() === email);
   const error = $("#add-member-error");
   if (!id) {
     error.textContent = "No account has that sign-in email.";
     return;
   }
   let issue = "";
-  const saved = updateState(latest => {
+  const saved = await updateState(latest => {
     const server = latest.servers.find(entry => entry.id === memberTargetId);
     if (!server) issue = "This server no longer exists.";
     else if (memberIds(server).includes(id)) issue = "This person already has access.";
     else {
       server.memberIds = [...memberIds(server), id];
-      recordEvent(latest, server, "Membership", "Added " + demoUsers[id].email);
+      recordEvent(latest, server, "Membership", "Added " + directory[id].email);
     }
   });
   if (!saved || issue) {
@@ -918,7 +1122,7 @@ $("#add-member-form").addEventListener("submit", event => {
   }
   addMemberDialog.close();
   render();
-  $("#admin-status").textContent = demoUsers[id].name + " added to the server.";
+  $("#admin-status").textContent = directory[id].name + " added to the server.";
   $("#admin-title").focus();
 });
 
@@ -962,7 +1166,7 @@ editMessageDialog.addEventListener("close", () => {
   if (!editMessageDialog.open) editingMessage = null;
 });
 editMessageInput.addEventListener("input", () => { editMessageError.textContent = ""; });
-$("#edit-message-form").addEventListener("submit", (event) => {
+$("#edit-message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!editingMessage) return;
   const text = editMessageInput.value.trim();
@@ -971,9 +1175,10 @@ $("#edit-message-form").addEventListener("submit", (event) => {
     editMessageInput.focus();
     return;
   }
-  const error = changeMessage(editingMessage, (messages, index) => {
+  const target = editingMessage;
+  const error = await changeMessage(target, (messages, index) => {
     const message = messages[index];
-    if (message.text !== editingMessage.text || message.editedAt !== editingMessage.editedAt) return false;
+    if (message.text !== target.text || message.editedAt !== target.editedAt) return false;
     if (message.text !== text) {
       message.text = text;
       message.editedAt = new Date().toISOString();
@@ -994,7 +1199,7 @@ function refreshAfterMessageChange(status) {
   messageInput.focus({ preventScroll: true });
   $("#message-status").textContent = status;
 }
-deleteOption.addEventListener("click", () => {
+deleteOption.addEventListener("click", async () => {
   const serverId = menuServerId;
   const channelId = menuChannelId;
   const messageId = menuMessageId;
@@ -1007,7 +1212,7 @@ deleteOption.addEventListener("click", () => {
     if (!window.confirm(moderation
       ? "Remove this message as an admin? The channel will show a removal marker."
       : "Delete this message? This cannot be undone.")) return;
-    const error = changeMessage(target, (messages, index) => {
+    const error = await changeMessage(target, (messages, index) => {
       if (moderation) {
         messages[index].text = "";
         messages[index].removedBy = currentUser.id;
@@ -1047,7 +1252,7 @@ $("#add-server").addEventListener("click", () => openCreate("server"));
 $("#add-channel").addEventListener("click", () => openCreate("channel"));
 $("#cancel-dialog").addEventListener("click", () => dialog.close());
 $("#close-dialog").addEventListener("click", () => dialog.close());
-$("#create-form").addEventListener("submit", (event) => {
+$("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!isAdmin()) return;
   const isChannel = dialogMode === "channel";
@@ -1059,7 +1264,7 @@ $("#create-form").addEventListener("submit", (event) => {
   }
   const serverId = createServerId;
   let creationError = "";
-  const saved = updateState((next) => {
+  const saved = await updateState((next) => {
     if (!isChannel) {
       const created = makeServer(name);
       recordEvent(next, created, "Servers", "Created server");
@@ -1077,7 +1282,7 @@ $("#create-form").addEventListener("submit", (event) => {
     }
   });
   if (creationError) { $("#dialog-error").textContent = creationError; return; }
-  if (!saved) { $("#dialog-error").textContent = "Could not save. Check your browser storage and try again."; return; }
+  if (!saved) { $("#dialog-error").textContent = "Could not save. Check your connection or storage and try again."; return; }
   const status = `${isChannel ? "Channel" : "Server"} ${name} created.`;
   dialog.close();
   if (isChannel && !$("#admin-page").hidden && adminSection === 0) {
@@ -1092,9 +1297,9 @@ $("#create-form").addEventListener("submit", (event) => {
     $("#message-status").textContent = status;
   }
 });
-messageForm.addEventListener("submit", (event) => {
+messageForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!currentUser || !activeChannel() || activeChannel().archived) return;
+  if (messageSending || !currentUser || !activeChannel() || activeChannel().archived) return;
   const text = messageInput.value.trim();
   if (!text || text.length > MAX_MESSAGE_LENGTH) {
     $("#message-error").textContent = "Enter a message of 1–2,000 characters.";
@@ -1102,16 +1307,37 @@ messageForm.addEventListener("submit", (event) => {
   }
   const channelId = activeChannel().id;
   const serverId = activeServer()?.id;
+  const draft = pendingDrafts.get(channelId);
+  if (draft) clearTimeout(draft.timer);
+  const previousAttempt = pendingMessages.get(channelId);
+  const message = previousAttempt?.text === text ? previousAttempt
+    : { id: id(), authorId: currentUser.id, authorName: currentUser.name, text, createdAt: new Date().toISOString() };
+  pendingMessages.set(channelId, message);
+  const sender = currentUser;
   let sent = false;
-  const saved = updateState((next) => {
+  messageSending = true;
+  messageForm.querySelector("button").disabled = true;
+  const saved = await updateState((next) => {
     const channel = messageChannel(next, { serverId, channelId });
     if (!channel || channel.archived) return;
-    channel.messages.push({ id: id(), authorId: currentUser.id, authorName: currentUser.name, text, createdAt: new Date().toISOString() });
-    if (!isAdmin() && /(?:^|\s)@admin\b/i.test(text)) recordEvent(next, serverFor(next, serverId), "Mentions", "Mentioned @Admin in #" + channel.name);
+    if (!channel.messages.some(entry => entry.id === message.id)) {
+      channel.messages.push(message);
+      if (!cloudEnabled && !isAdmin() && /(?:^|\s)@admin\b/i.test(text)) {
+        recordEvent(next, serverFor(next, serverId), "Mentions", "Mentioned @Admin in #" + channel.name);
+      }
+    }
     if (isAdmin()) channel.draft = "";
     else if (channel.drafts) delete channel.drafts[currentUser.id];
     sent = true;
   });
+  messageSending = false;
+  if (sender !== currentUser) return;
+  if (saved) pendingMessages.delete(channelId);
+  messageForm.querySelector("button").disabled = messageInput.disabled;
+  if (draft && pendingDrafts.get(channelId) === draft) {
+    if (saved && sent) pendingDrafts.delete(channelId);
+    else draft.timer = setTimeout(() => { void saveCloudDraft(channelId); }, 400);
+  }
   if (saved && sent) {
     render(); $("#message-status").textContent = "Message sent."; messageInput.focus();
   } else if (saved) {
@@ -1124,16 +1350,34 @@ messageInput.addEventListener("input", () => {
   $("#message-error").textContent = ""; $("#message-status").textContent = "";
   const channelId = activeChannel().id;
   const serverId = activeServer()?.id;
-  updateState((next) => {
-    const channel = messageChannel(next, { serverId, channelId });
-    if (!channel || channel.archived) return;
-    if (isAdmin()) channel.draft = messageInput.value;
-    else {
-      channel.drafts ??= {};
-      channel.drafts[currentUser.id] = messageInput.value;
-    }
-  });
+  const text = messageInput.value;
+  if (cloudEnabled) {
+    const previous = pendingDrafts.get(channelId);
+    if (previous) clearTimeout(previous.timer);
+    const draft = { serverId, text, timer: setTimeout(() => { void saveCloudDraft(channelId); }, 400) };
+    pendingDrafts.set(channelId, draft);
+  } else {
+    updateState(next => applyDraft(next, { serverId, channelId }, text));
+  }
 });
+function applyDraft(workspace, target, text) {
+  const channel = messageChannel(workspace, target);
+  if (!channel || channel.archived) return;
+  if (isAdmin()) channel.draft = text;
+  else {
+    channel.drafts ??= {};
+    channel.drafts[currentUser.id] = text;
+  }
+}
+
+async function saveCloudDraft(channelId) {
+  const draft = pendingDrafts.get(channelId);
+  if (!draft) return;
+  clearTimeout(draft.timer);
+  const saved = await updateState(next => applyDraft(next, { serverId: draft.serverId, channelId }, draft.text));
+  if (saved && pendingDrafts.get(channelId) === draft) pendingDrafts.delete(channelId);
+}
+
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); messageForm.requestSubmit(); }
 });
@@ -1144,6 +1388,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && sidebar.classList.contains("open") && !dialog.open) { closeSidebar(); menuButton.focus(); }
 });
 window.addEventListener("storage", (event) => {
+  if (cloudEnabled) return;
   if (event.key === PRESENCE_KEY || event.key?.startsWith(PRESENCE_KEY + ".")) {
     if (currentUser && event.key === scopedKey(PRESENCE_KEY, currentUser.id)) {
       presence = loadPresence();
@@ -1163,6 +1408,7 @@ window.addEventListener("storage", (event) => {
 });
 initAdminSettings();
 renderSession();
+if (cloudEnabled) void startCloud();
 
 function updateMemberStatus(indicator, userId) {
   const status = loadPresence(userId);
@@ -1181,7 +1427,8 @@ function memberRow(id, server = null) {
   const member = loadUser(id);
   const row = node("li", "member-row");
   const identity = node("div");
-  const details = [demoUsers[id].email];
+  const directory = cloudEnabled ? cloudAccounts : demoUsers;
+  const details = directory[id]?.email ? [directory[id].email] : [];
   if (server && member.designation.trim()) details.push(member.designation.trim());
   details.push(member.role);
   const name = node("div", "member-name");
@@ -1198,13 +1445,13 @@ function memberRow(id, server = null) {
     const remove = node("button", "button secondary member-remove", "Remove");
     remove.type = "button";
     remove.setAttribute("aria-label", "Remove " + member.name + " from " + server.name);
-    remove.addEventListener("click", () => {
+    remove.addEventListener("click", async () => {
       if (!isAdmin() || !window.confirm("Remove " + member.name + " from " + server.name + "? They will lose access to its channels.")) return;
-      const saved = updateState(latest => {
+      const saved = await updateState(latest => {
         const target = latest.servers.find(entry => entry.id === server.id);
         if (target && memberIds(target).includes(id)) {
           target.memberIds = memberIds(target).filter(memberId => memberId !== id);
-          recordEvent(latest, target, "Membership", "Removed " + demoUsers[id].email);
+          recordEvent(latest, target, "Membership", "Removed " + directory[id].email);
         }
       });
       if (saved) {

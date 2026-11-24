@@ -106,7 +106,7 @@ function managementSettings() {
       const list = node("ul", "admin-list managed-members");
       for (const id of memberIds(server)) {
         const user = loadUser(id);
-        if (!(user.name + " " + demoUsers[id].email).toLowerCase().includes(memberQuery.toLowerCase())) continue;
+        if (!(user.name + " " + (cloudEnabled ? cloudAccounts : demoUsers)[id].email).toLowerCase().includes(memberQuery.toLowerCase())) continue;
         list.append(memberRow(id, server));
       }
       memberResults.replaceChildren(list.children.length ? list : node("p", "", "No matching members."));
@@ -152,7 +152,7 @@ function validAdminData(value) {
   const alerts = value?.alerts ?? {};
   const helpRequests = value?.helpRequests ?? [];
   if (!Array.isArray(helpRequests) || !helpRequests.every(request => request &&
-    typeof request.id === "string" && Object.hasOwn(demoUsers, request.authorId) && request.authorId !== ADMIN_ID &&
+    typeof request.id === "string" && Object.hasOwn(cloudEnabled ? cloudAccounts : demoUsers, request.authorId) && request.authorId !== ADMIN_ID &&
     typeof request.message === "string" && request.message.trim() && request.message.length <= MAX_HELP_LENGTH &&
     (request.reply === undefined || (typeof request.reply === "string" && request.reply.length <= MAX_HELP_LENGTH)) &&
     Number.isFinite(Date.parse(request.createdAt)) && helpStatuses.includes(request.status))) return false;
@@ -240,13 +240,22 @@ function dataSettings() {
     const user = currentUser;
     feedback.textContent = "";
     $("#admin-status").textContent = "";
-    if (newPassword.length < 8 || newPassword !== confirm.value || oldPassword === newPassword) {
-      feedback.textContent = "Choose a different password of at least 8 characters and enter it twice.";
+    const minimumLength = cloudEnabled ? 12 : 8;
+    if (newPassword.length < minimumLength || newPassword !== confirm.value || oldPassword === newPassword) {
+      feedback.textContent = `Choose a different password of at least ${minimumLength} characters and enter it twice.`;
       return;
     }
     for (const input of fields) input.readOnly = true;
     button.disabled = true;
     try {
+      if (cloudEnabled) {
+        await cloud.changePassword(cloudAccounts[user.id].email, oldPassword, newPassword);
+        if (currentUser === user) {
+          form.reset();
+          $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
+        }
+        return;
+      }
       const previous = passwordCredentials(user.id);
       if (!oldPassword || await passwordDigest(oldPassword, previous.salt) !== previous.digest) {
         feedback.textContent = "The current password is incorrect.";
@@ -262,7 +271,11 @@ function dataSettings() {
       localStorage.setItem(scopedKey(PASSWORD_KEY, user.id), JSON.stringify({ salt, digest }));
       form.reset();
       $("#admin-status").textContent = "Password changed. Use your new password next time you sign in.";
-    } catch {
+    } catch (error) {
+      if (error.code === "invalid_credentials") {
+        feedback.textContent = "The current password is incorrect.";
+        return;
+      }
       feedback.textContent = "Could not change the password. Check browser storage and try again.";
     } finally {
       button.disabled = false;
@@ -311,7 +324,7 @@ function helpRequestForm() {
   submit.type = "submit";
   form.append(label, submit);
 
-  form.addEventListener("submit", event => {
+  form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!currentUser || isAdmin() || !form.isConnected) return;
     const text = message.value.trim();
@@ -321,7 +334,7 @@ function helpRequestForm() {
     }
     const request = { id: id(), authorId: currentUser.id, message: text,
       createdAt: new Date().toISOString(), status: "Pending" };
-    if (!updateState(next => {
+    if (!await updateState(next => {
       next.helpRequests ??= [];
       next.helpRequests.push(request);
     })) {
@@ -369,14 +382,14 @@ function helpRequestRow(request, draft) {
   return row;
 }
 
-function reviewHelpRequest(requestId, decision, reply) {
+async function reviewHelpRequest(requestId, decision, reply) {
   if (!isAdmin() || !["Resolved", "Rejected"].includes(decision)) return;
   if (reply.length > MAX_HELP_LENGTH) {
     $("#admin-status").textContent = "Keep your reply to 1,000 characters or fewer.";
     return;
   }
   let reviewed = false;
-  const saved = updateState(next => {
+  const saved = await updateState(next => {
     const request = next.helpRequests?.find(entry => entry.id === requestId);
     if (request?.status !== "Pending") return;
     request.status = decision;
