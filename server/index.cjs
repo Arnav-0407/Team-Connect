@@ -1,6 +1,6 @@
 const { createServer } = require("node:http");
 const { readFile } = require("node:fs/promises");
-const { resolve } = require("node:path");
+const { dirname, resolve } = require("node:path");
 const { openDatabase, AppError } = require("./database.cjs");
 
 const root = resolve(__dirname, "..");
@@ -30,8 +30,28 @@ async function jsonBody(request) {
   }
 }
 
-function createTeamConnectServer({ filename, origin } = {}) {
-  const db = openDatabase(filename);
+function backendConfig(env) {
+  const url = env.SUPABASE_URL;
+  const publishableKey = env.SUPABASE_PUBLISHABLE_KEY;
+  const mode = env.TEAM_CONNECT_BACKEND ?? (url || publishableKey ? "supabase" : "sqlite");
+  if (mode === "sqlite") return { backend: mode };
+  if (mode !== "supabase") throw new Error("TEAM_CONNECT_BACKEND must be supabase or sqlite.");
+  let project;
+  try { project = new URL(url); } catch {}
+  if (!project || project.protocol !== "https:" || !project.hostname.endsWith(".supabase.co") ||
+      project.hostname === "your-project-ref.supabase.co" || project.pathname !== "/" || project.search || project.hash ||
+      project.username || project.password || !/^sb_publishable_[A-Za-z0-9_-]{12,}$/.test(publishableKey ?? "") ||
+      publishableKey === "sb_publishable_your_key_here") {
+    throw new Error("Set the Supabase project URL and publishable key in .env.");
+  }
+  return { backend: mode, url: project.origin, publishableKey };
+}
+
+const browserConfigSource = config => "globalThis.teamConnectConfig = " + JSON.stringify(config) + ";\n";
+const supabaseSdkFile = () => resolve(dirname(require.resolve("@supabase/supabase-js")), "umd/supabase.js");
+
+function createTeamConnectServer({ filename, origin, config = { backend: "sqlite" } } = {}) {
+  const db = config.backend === "sqlite" ? openDatabase(filename) : null;
   const secure = origin?.startsWith("https://");
   const streams = new Set();
   const attempts = new Map();
@@ -150,13 +170,21 @@ function createTeamConnectServer({ filename, origin } = {}) {
     response.setHeader("X-Content-Type-Options", "nosniff");
     try {
       const pathname = new URL(request.url, "http://localhost").pathname;
-      if (pathname.startsWith("/api/")) return await api(request, response, pathname);
+      if (pathname.startsWith("/api/")) {
+        if (!db) throw new AppError(404, "Page not found.");
+        return await api(request, response, pathname);
+      }
       if (request.method !== "GET" && request.method !== "HEAD") {
         throw new AppError(405, "This page only supports GET and HEAD.");
       }
       if (pathname === "/js/backendConfig.js") {
         response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
-        return response.end(request.method === "HEAD" ? undefined : 'globalThis.teamConnectConfig = { backend: "sqlite" };\n');
+        return response.end(request.method === "HEAD" ? undefined : browserConfigSource(config));
+      }
+      if (pathname === "/js/supabase-sdk.js" && config.backend === "supabase") {
+        const body = request.method === "HEAD" ? undefined : await readFile(supabaseSdkFile());
+        response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" });
+        return response.end(body);
       }
       const asset = pathname === "/" ? "/index.html" : pathname;
       if (asset !== "/index.html" && !/^\/(?:js\/(?:[\w-]+\/)*[\w-]+\.js|css\/[\w-]+\.css)$/.test(asset)) {
@@ -182,21 +210,24 @@ function createTeamConnectServer({ filename, origin } = {}) {
     }
   }, 15000);
   heartbeat.unref();
-  server.on("close", () => { clearInterval(heartbeat); db.close(); });
+  server.on("close", () => { clearInterval(heartbeat); db?.close(); });
   server.closeLiveStreams = () => { for (const stream of streams) stream.response.end(); };
   return server;
 }
 
 if (require.main === module) {
+  try { process.loadEnvFile(resolve(root, ".env")); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  const config = backendConfig(process.env);
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8000);
   const origin = process.env.TEAM_CONNECT_ORIGIN;
   if (origin && new URL(origin).origin !== origin) throw new Error("TEAM_CONNECT_ORIGIN must be an origin without a trailing slash.");
-  const server = createTeamConnectServer({ origin });
-  server.listen(port, host, () => console.log("Team Connect listening at " + (origin || `http://${host}:${port}`)));
+  const server = createTeamConnectServer({ origin, config });
+  server.listen(port, host, () => console.log("Team Connect (" + config.backend + ") listening at " + (origin || `http://${host}:${port}`)));
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => { server.closeLiveStreams(); server.close(); });
   }
 }
 
-module.exports = { createTeamConnectServer };
+module.exports = { backendConfig, browserConfigSource, supabaseSdkFile, createTeamConnectServer };

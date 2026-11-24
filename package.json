@@ -1,11 +1,17 @@
 {
   "name": "team-connect",
   "private": true,
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node server/index.cjs",
     "test": "node --test",
+    "prepare:live-server": "node scripts/prepare-live-server.cjs",
     "account": "node scripts/set-account-password.cjs",
     "import-history": "node scripts/prepare-history-import.cjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.119.2"
   }
 }

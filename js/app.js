@@ -1,7 +1,8 @@
 const STORAGE_KEY = "teamconnect.workspace.v1";
 const MAX_MESSAGE_LENGTH = 2000;
 const cloudConfig = globalThis.teamConnectConfig;
-const cloudEnabled = cloudConfig?.backend === "sqlite";
+const supabaseEnabled = cloudConfig?.backend === "supabase";
+const cloudEnabled = supabaseEnabled || cloudConfig?.backend === "sqlite";
 let cloud;
 let cloudAccounts = {};
 let cloudProfiles = new Map();
@@ -16,19 +17,14 @@ let messageSending = false;
 const pendingDrafts = new Map();
 const pendingMessages = new Map();
 let openingSession;
-const PASSWORD_KEY = "teamconnect.password.v1";
 const PROFILE_KEY = "teamconnect.profile.v1";
 const PRESENCE_KEY = "teamconnect.presence";
 const APPEARANCE_KEY = "teamconnect.appearance.v1";
-const DEMO_SESSION_KEY = "teamconnect.demo-session.v2";
 const ADMIN_ID = "user-arnav";
 const demoUsers = {
-  "user-arnav": { name: "Admin", email: "Admin@gmail.com", role: "Workspace Admin",
-    salt: "271ee78fb99a5f6e7d4289e943726432", digest: "b56b6ac80ea30c16d9112af12def68cd07ecfa46f902a355c5a7caf1d446b1ee" },
-  "employee-arnav": { name: "Arnav Shaw", email: "arnavshaw@gmail.com", role: "Employee",
-    salt: "931068b51fdad6436b1a1c92e319b3f1", digest: "060b5afc60df6c7faa7f76cf0d03fc131fa6fed6923228f8749cb7022796685f" },
-  "employee-parth": { name: "Parth Singhal", email: "parthsinghal@gmail.com", role: "Employee",
-    salt: "e240bd8fbe4716a7f690bb6a297549c2", digest: "04b35b6533a38717f8fd96c1cbef23d725bc088e249910a5bb1ed44495f2cab3" }
+  "user-arnav": { name: "Admin", email: "", role: "Workspace Admin" },
+  "employee-arnav": { name: "Arnav Shaw", email: "", role: "Employee" },
+  "employee-parth": { name: "Parth Singhal", email: "", role: "Employee" }
 };
 const MAX_PHOTO_SIZE = 256 * 1024;
 const photoTypes = ["image/png", "image/jpeg", "image/webp"];
@@ -67,11 +63,14 @@ function loadUser(userId) {
   } catch { /* Keep the demo profile if browser storage is unavailable. */ }
   return user;
 }
-let userId = null;
+// Remove browser-only credentials from the retired demo sign-in.
 try {
-  if (!cloudEnabled) userId = sessionStorage.getItem(DEMO_SESSION_KEY);
-} catch { /* Sign in again when session storage is unavailable. */ }
-let currentUser = loadUser(userId);
+  for (const id of Object.keys(demoUsers)) localStorage.removeItem(scopedKey("teamconnect.password.v1", id));
+} catch { /* Browser storage can be unavailable. */ }
+try {
+  sessionStorage.removeItem("teamconnect.demo-session.v2");
+} catch { /* The demo session is no longer used. */ }
+let currentUser = null;
 function isAdmin() { return currentUser?.role === "Workspace Admin"; }
 function loadPresence(userId = currentUser?.id) {
   try {
@@ -245,7 +244,8 @@ function refreshCloud() {
       if (await cloud.revision(authId) === cloudRevision) return;
       const snapshot = await cloud.snapshot();
       if (!isCurrent()) return;
-      if (snapshot.account !== authId) { await openCloudSession({ user: { id: snapshot.account } }); return; }
+      const snapshotAuthId = snapshot.authId ?? snapshot.account;
+      if (snapshotAuthId !== authId) { await openCloudSession({ user: { id: snapshotAuthId } }); return; }
       const channelId = activeChannel()?.id;
       const scroll = messageList.scrollTop;
       const atBottom = messageList.scrollHeight - messageList.clientHeight - scroll < 48;
@@ -261,7 +261,10 @@ function refreshCloud() {
     } catch (error) {
       if (error.status === 401 && isCurrent()) {
         const session = await cloud.getSession().catch(() => null);
-        if (isCurrent()) await openCloudSession(session).catch(() => {});
+        if (isCurrent()) {
+          if (session?.user?.id === authId) await openCloudSession(null);
+          else await openCloudSession(session).catch(() => {});
+        }
       }
       // A dropped connection is retried by the next subscription event or revision check.
     }
@@ -351,7 +354,7 @@ async function finishCloudSession(attempt) {
     throw error;
   }
   if (openingSession !== attempt) return;
-  if (snapshot.account !== authId) throw new Error("The account changed while signing in.");
+  if ((snapshot.authId ?? snapshot.account) !== authId) throw new Error("The account changed while signing in.");
   applyCloudSnapshot(snapshot);
   changeSession(loadUser(snapshot.account));
   cloudUnsubscribe = cloud.subscribe(authId, refreshCloud);
@@ -361,7 +364,7 @@ async function startCloud() {
   const submit = $("#sign-in-submit");
   submit.disabled = true;
   try {
-    cloud = globalThis.teamConnectTestBackend ?? createCloudWorkspace();
+    cloud = globalThis.teamConnectTestBackend ?? (supabaseEnabled ? await createSupabaseWorkspace(cloudConfig) : createCloudWorkspace());
     cloud.onAuthChange((event, session) => {
       if (event === "SIGNED_OUT" || (event === "SIGNED_IN" && session?.user?.id !== cloudAuthId)) {
         void openCloudSession(session).catch(() => {
@@ -748,9 +751,6 @@ function renderSession() {
 }
 function changeSession(user) {
   currentUser = user;
-  try {
-    if (!cloudEnabled) sessionStorage.setItem(DEMO_SESSION_KEY, user?.id ?? "signed-out");
-  } catch { /* The demo still works until the page reloads. */ }
   closeProfileMenu();
   closeSettingsPages();
   closeSidebar();
@@ -761,29 +761,6 @@ function changeSession(user) {
   if (user) (menuButton.getClientRects().length ? menuButton : profileTrigger).focus();
   else $("#demo-sign-in-title").focus();
 }
-function passwordCredentials(userId) {
-  const saved = localStorage.getItem(scopedKey(PASSWORD_KEY, userId));
-  if (saved === null) return demoUsers[userId];
-  const credentials = JSON.parse(saved);
-  if (!/^[a-f0-9]{32}$/.test(credentials?.salt) || !/^[a-f0-9]{64}$/.test(credentials?.digest)) {
-    throw new Error("Invalid saved credential");
-  }
-  return credentials;
-}
-
-function hex(bytes) {
-  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function passwordDigest(password, salt) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({
-    name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(salt), iterations: 600000
-  }, key, 256);
-  return hex(new Uint8Array(bits));
-}
-
 $("#log-out").addEventListener("click", async () => {
   if (!cloudEnabled) return changeSession(null);
   try {
@@ -797,39 +774,23 @@ $("#log-out").addEventListener("click", async () => {
 $("#demo-sign-in-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = $("#sign-in-submit");
-  if (currentUser || submit.disabled) return;
+  if (!cloud || currentUser || submit.disabled) return;
   const email = $("#demo-account").value.trim().toLowerCase();
   const password = $("#sign-in-password");
   const error = $("#sign-in-error");
   submit.disabled = true;
   error.textContent = "";
   try {
-    if (cloudEnabled) {
-      const { session } = await cloud.signIn(email, password.value);
-      await openCloudSession(session);
-      password.value = "";
-      return;
-    }
-    const match = Object.entries(demoUsers).find(([, account]) => account.email.toLowerCase() === email);
-    if (match) {
-      const [id] = match;
-      const account = passwordCredentials(id);
-      if (await passwordDigest(password.value, account.salt) === account.digest &&
-          passwordCredentials(id).digest === account.digest) {
-        password.value = "";
-        changeSession(loadUser(id));
-        return;
-      }
-    }
-    error.textContent = "The email or password is incorrect.";
-    password.focus();
+    const { session } = await cloud.signIn(email, password.value);
+    await openCloudSession(session);
+    password.value = "";
   } catch (reason) {
-    if (cloudEnabled) {
-      error.textContent = reason?.code === "invalid_credentials" ? "The email or password is incorrect."
-        : "Could not open Team Connect. Check your connection and workspace access.";
-      return;
-    }
-    error.textContent = "Password verification is unavailable. Check browser storage and open TeamConnect using HTTPS or localhost.";
+    error.textContent = reason?.code === "invalid_credentials" ? "The email or password is incorrect."
+      : reason?.code === "email_not_confirmed" ? "Confirm your email address in Supabase before signing in."
+      : reason?.code === "PGRST202" ? "The Team Connect database setup is still pending."
+      : reason?.code === "42501" ? "This sign-in is not linked to a Team Connect account."
+      : "Could not open Team Connect. Check your connection and workspace access.";
+    password.focus();
   } finally {
     submit.disabled = false;
   }
@@ -1409,6 +1370,10 @@ window.addEventListener("storage", (event) => {
 initAdminSettings();
 renderSession();
 if (cloudEnabled) void startCloud();
+else {
+  $("#sign-in-submit").disabled = true;
+  $("#sign-in-error").textContent = "Open Team Connect through its configured server to sign in.";
+}
 
 function updateMemberStatus(indicator, userId) {
   const status = loadPresence(userId);
